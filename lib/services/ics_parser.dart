@@ -109,7 +109,7 @@ List<IcsEvent> _expandRecurringForWindow(
       return byday.contains(map[dt.weekday]);
     }
 
-    final step = const Duration(days: 1);
+    const step = Duration(days: 1);
     DateTime instStart = e.start;
     DateTime instEnd = e.end;
     int emitted = 0;
@@ -171,7 +171,7 @@ IcsParseResult parseIcs(String content) {
   bool inEvent = false;
   int attendeeCount = 0;
 
-  DateTime? _valueDateToStart(String v) {
+  DateTime? valueDateToStart(String v) {
     if (v.length >= 8) {
       final y = int.parse(v.substring(0, 4));
       final m = int.parse(v.substring(4, 6));
@@ -181,8 +181,8 @@ IcsParseResult parseIcs(String content) {
     return null;
   }
 
-  DateTime? _valueDateToEnd(String v) {
-    final s = _valueDateToStart(v);
+  DateTime? valueDateToEnd(String v) {
+    final s = valueDateToStart(v);
     if (s == null) return null;
     return s.add(const Duration(days: 1));
   }
@@ -216,7 +216,7 @@ IcsParseResult parseIcs(String content) {
       } else if (cur.keys.any((k) => k.startsWith('DTSTART;VALUE=DATE'))) {
         final k = cur.keys.firstWhere((k) => k.startsWith('DTSTART;VALUE=DATE'));
         final v = cur[k]!;
-        dtStart = _valueDateToStart(v);
+        dtStart = valueDateToStart(v);
         allDay = true;
       } else if (cur.keys.any((k) => k.startsWith('DTSTART;TZID'))) {
         dtStart = _parseIcsDateTime(cur[cur.keys.firstWhere((k) => k.startsWith('DTSTART;TZID'))]!);
@@ -227,7 +227,7 @@ IcsParseResult parseIcs(String content) {
       } else if (cur.keys.any((k) => k.startsWith('DTEND;VALUE=DATE'))) {
         final k = cur.keys.firstWhere((k) => k.startsWith('DTEND;VALUE=DATE'));
         final v = cur[k]!;
-        dtEnd = _valueDateToEnd(v);
+        dtEnd = valueDateToEnd(v);
         allDay = true;
       } else if (cur.keys.any((k) => k.startsWith('DTEND;TZID'))) {
         dtEnd = _parseIcsDateTime(cur[cur.keys.firstWhere((k) => k.startsWith('DTEND;TZID'))]!);
@@ -309,10 +309,11 @@ class _IcsDayCache {
     final simple = <IcsEvent>[];
     final recurring = <IcsEvent>[];
     for (final e in allEvents) {
-      if (e.rrule == null || e.rrule!.trim().isEmpty)
+      if (e.rrule == null || e.rrule!.trim().isEmpty) {
         simple.add(e);
-      else
+      } else {
         recurring.add(e);
+      }
     }
 
     final from = DateTime(day.year, day.month, day.day);
@@ -428,11 +429,11 @@ class _IcsDayCache {
   }
 }
 
-final _IcsDayCache _DAY_CACHE = _IcsDayCache();
-void clearIcsDayCache() => _DAY_CACHE.clear();
+final _IcsDayCache _dayCache = _IcsDayCache();
+void clearIcsDayCache() => _dayCache.clear();
 
 DayCalendar buildDayCalendarCached({required List<IcsEvent> allEvents, required DateTime day}) =>
-    _DAY_CACHE.getOrCompute(allEvents, day);
+    _dayCache.getOrCompute(allEvents, day);
 
 DayCalendar buildDayCalendar({required List<IcsEvent> allEvents, required DateTime day}) =>
     buildDayCalendarCached(allEvents: allEvents, day: day);

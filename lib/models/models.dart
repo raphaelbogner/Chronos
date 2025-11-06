@@ -21,6 +21,13 @@ class SettingsModel {
   String csvColPauseTotal; // Spalte für Gesamtpausendauer an dem Tag
   String csvColPauseRanges; // Spalte für die einzelnen Pausen im Format ("10:00-10:15; 10:30-10:45")
 
+  // GitLab
+  String gitlabBaseUrl; // https://gitlab.example.com
+  String gitlabToken; // PRIVATE-TOKEN
+  String gitlabProjectIds; // Komma-/Leerzeichen-getrennt: "123, 456"
+  String gitlabAuthorEmail; // optional: nur Commits dieser Mail
+  int gitlabLookbackDays; // Lookback in Tagen, um „letztes Ticket“ vor dem Zeitraum zu finden
+
   SettingsModel({
     this.meetingIssueKey = '',
     this.fallbackIssueKey = '',
@@ -38,6 +45,11 @@ class SettingsModel {
     this.csvColDuration = 'GIBA',
     this.csvColPauseTotal = 'P',
     this.csvColPauseRanges = 'Pausen',
+    this.gitlabBaseUrl = '',
+    this.gitlabToken = '',
+    this.gitlabProjectIds = '',
+    this.gitlabAuthorEmail = '',
+    this.gitlabLookbackDays = 30,
   });
 
   Map<String, dynamic> toJson() => {
@@ -56,6 +68,11 @@ class SettingsModel {
         'csvColDuration': csvColDuration,
         'csvColPauseTotal': csvColPauseTotal,
         'csvColPauseRanges': csvColPauseRanges,
+        'gitlabBaseUrl': gitlabBaseUrl,
+        'gitlabToken': gitlabToken,
+        'gitlabProjectIds': gitlabProjectIds,
+        'gitlabAuthorEmail': gitlabAuthorEmail,
+        'gitlabLookbackDays': gitlabLookbackDays,
       };
 
   factory SettingsModel.fromJson(Map<String, dynamic> m) => SettingsModel(
@@ -74,6 +91,13 @@ class SettingsModel {
         csvColDuration: (m['csvColDuration'] ?? '').toString(),
         csvColPauseTotal: (m['csvColPauseTotal'] ?? '').toString(),
         csvColPauseRanges: (m['csvColPauseRanges'] ?? '').toString(),
+        gitlabBaseUrl: (m['gitlabBaseUrl'] ?? '').toString(),
+        gitlabToken: (m['gitlabToken'] ?? '').toString(),
+        gitlabProjectIds: (m['gitlabProjectIds'] ?? '').toString(),
+        gitlabAuthorEmail: (m['gitlabAuthorEmail'] ?? '').toString(),
+        gitlabLookbackDays: (m['gitlabLookbackDays'] ?? 30) is int
+            ? m['gitlabLookbackDays'] as int
+            : int.tryParse((m['gitlabLookbackDays'] ?? '30').toString()) ?? 30,
       );
 }
 

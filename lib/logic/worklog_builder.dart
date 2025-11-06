@@ -1,5 +1,4 @@
 // lib/logic/worklog_builder.dart
-import 'package:collection/collection.dart';
 
 class WorkWindow {
   WorkWindow(this.start, this.end);
@@ -41,6 +40,9 @@ List<WorkWindow> subtractIntervals(WorkWindow base, List<WorkWindow> cutters) {
   return pieces.where((w) => w.duration.inSeconds >= 60).toList();
 }
 
+/// Optionaler Resolver, der für ein Rest-Intervall die Issue bestimmt (z. B. via GitLab)
+typedef FallbackIssueResolver = String? Function(DateTime start, DateTime end);
+
 List<DraftLog> buildDraftsForDay({
   required DateTime day,
   required List<WorkWindow> workWindows,
@@ -49,6 +51,7 @@ List<DraftLog> buildDraftsForDay({
   required String fallbackIssueKey,
   required String? meetingNotePrefix,
   required String? fallbackNote,
+  FallbackIssueResolver? fallbackResolver,
 }) {
   final drafts = <DraftLog>[];
 
@@ -59,7 +62,7 @@ List<DraftLog> buildDraftsForDay({
           final e = m.end.isBefore(w.end) ? m.end : w.end;
           return e.isAfter(s) ? WorkWindow(s, e) : null;
         })
-        .whereNotNull()
+        .nonNulls
         .toList();
 
     for (final piece in meetingPieces) {
@@ -72,17 +75,20 @@ List<DraftLog> buildDraftsForDay({
     }
   }
 
+  // Rest = Arbeitsfenster minus Meetings
   final fallbackPieces = <WorkWindow>[];
   for (final w in workWindows) {
     final cut = subtractIntervals(w, meetings);
     fallbackPieces.addAll(cut);
   }
 
+  // Fallback auflösen (optional via Resolver), sonst fixed
   for (final piece in fallbackPieces) {
+    final issue = fallbackResolver?.call(piece.start, piece.end) ?? fallbackIssueKey;
     drafts.add(DraftLog(
       start: piece.start,
       end: piece.end,
-      issueKey: fallbackIssueKey,
+      issueKey: issue,
       note: fallbackNote ?? 'Rest',
     ));
   }
