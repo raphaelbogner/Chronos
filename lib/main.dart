@@ -1,3 +1,4 @@
+// lib/main.dart
 import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
@@ -43,7 +44,7 @@ class AppState extends ChangeNotifier {
   List<TimetacRow> timetac = [];
   List<IcsEvent> icsEvents = [];
 
-  // ✨ GitLab Commits Cache
+  // GitLab Cache
   List<GitlabCommit> gitlabCommits = [];
 
   DateTimeRange? range;
@@ -64,7 +65,6 @@ class AppState extends ChangeNotifier {
     await p.setString('settings', jsonEncode(settings.toJson()));
   }
 
-  // --- CSV-Klassifizierer wie gehabt (gekürzt hier) ---
   static bool _isCsvAbsence(String desc) {
     final d = desc.toLowerCase();
     return d.contains('urlaub') || d.contains('feiertag') || d.contains('krank') || d.contains('abwesen');
@@ -82,7 +82,7 @@ class AppState extends ChangeNotifier {
     return mins >= 420 && mins <= 540;
   }
 
-  // Produktive Arbeitsfenster inkl. Abzug Pausen
+  // Arbeitsfenster inkl. Pausen-Abzug
   List<WorkWindow> workWindowsForDay(DateTime d) {
     final rows = timetac.where((r) => r.date.year == d.year && r.date.month == d.month && r.date.day == d.day);
     final raw = <WorkWindow>[];
@@ -93,6 +93,7 @@ class AppState extends ChangeNotifier {
       if (r.start != null && r.end != null) raw.add(WorkWindow(r.start!, r.end!));
     }
     if (raw.isEmpty) return raw;
+
     final pauses = <WorkWindow>[];
     for (final r in rows) {
       for (final pr in r.pauses) {
@@ -100,6 +101,7 @@ class AppState extends ChangeNotifier {
       }
     }
     if (pauses.isEmpty) return raw;
+
     final cut = <WorkWindow>[];
     for (final w in raw) {
       cut.addAll(subtractIntervals(w, pauses));
@@ -109,14 +111,25 @@ class AppState extends ChangeNotifier {
 
   Duration _timetacProductiveOn(DateTime d) {
     final ws = workWindowsForDay(d);
-    return ws.fold<Duration>(Duration.zero, (p, w) => p + w.duration);
+    var total = Duration.zero;
+    for (final w in ws) {
+      total += w.duration;
+    }
+    return total;
   }
 
   Duration _meetingsIntersectedWithTimetac(DateTime d) {
     final workWindows = workWindowsForDay(d);
     if (workWindows.isEmpty) return Duration.zero;
-    final meetings = buildDayCalendarCached(allEvents: icsEvents, day: d).meetings;
-    Duration sum = Duration.zero;
+
+    List<IcsEvent> meetings;
+    if (userRangeCacheCoversDay(day: d, userEmail: settings.jiraEmail)) {
+      meetings = meetingsForUserOnDayFast(day: d, userEmail: settings.jiraEmail);
+    } else {
+      meetings = buildDayCalendarCached(allEvents: icsEvents, day: d).meetings;
+    }
+
+    var sum = Duration.zero;
     for (final m in meetings) {
       for (final w in workWindows) {
         final s = m.start.isAfter(w.start) ? m.start : w.start;
@@ -128,29 +141,25 @@ class AppState extends ChangeNotifier {
   }
 
   List<DayTotals> get totals {
-    final dates = <DateTime>{};
-    for (final t in timetac) {
-      dates.add(DateTime(t.date.year, t.date.month, t.date.day));
-    }
-    for (final e in icsEvents) {
-      dates.add(DateTime(e.start.year, e.start.month, e.start.day));
-    }
-    var list = dates.toList();
+    final dates = <DateTime>{
+      ...timetac.map((e) => DateTime(e.date.year, e.date.month, e.date.day)),
+      ...icsEvents.map((e) => DateTime(e.start.year, e.start.month, e.start.day)),
+    }.toList()
+      ..sort();
+
     if (range != null) {
       final s = DateTime(range!.start.year, range!.start.month, range!.start.day);
       final e = DateTime(range!.end.year, range!.end.month, range!.end.day);
-      list = list.where((d) => !d.isBefore(s) && !d.isAfter(e)).toList();
+      dates.retainWhere((d) => !d.isBefore(s) && !d.isAfter(e));
     }
-    list.sort();
-    return [
-      for (final d in list)
-        DayTotals(
-          date: d,
-          timetacTotal: _timetacProductiveOn(d),
-          meetingsTotal: _meetingsIntersectedWithTimetac(d),
-          leftover: _timetacProductiveOn(d) - _meetingsIntersectedWithTimetac(d),
-        )
-    ];
+
+    final out = <DayTotals>[];
+    for (final d in dates) {
+      final tt = _timetacProductiveOn(d);
+      final mt = _meetingsIntersectedWithTimetac(d);
+      out.add(DayTotals(date: d, timetacTotal: tt, meetingsTotal: mt, leftover: tt - mt));
+    }
+    return out;
   }
 }
 
@@ -160,7 +169,6 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-// ✅ Commit-Datenstruktur mit extrahiertem Ticket
 class _CT {
   _CT(this.at, this.ticket, this.projectId, this.msgFirstLine);
   DateTime at;
@@ -174,37 +182,28 @@ class _HomePageState extends State<HomePage> {
   bool _busy = false;
   String _log = '';
   List<DraftLog> _drafts = [];
+  Map<String, String> _jiraSummaryCache = {};
 
-  // Ticket am Anfang erkennen – robust gegen Emojis/Prefix/Brackets.
-// 1) führende Nicht-Alphanumerics wegschnippeln (z. B. „✨ “, „[“, „-“, etc.)
-// 2) dann [PROJ-123] oder PROJ-123 matchen
   String? _leadingTicket(String msg) {
     if (msg.isEmpty) return null;
     if (msg.toLowerCase().startsWith('merge')) return null;
-
     final line = msg.split('\n').first.trimLeft();
     final cleaned = line.replaceFirst(RegExp(r'^[^\w\[]+'), '');
-
-    // Case-insensitive, erlaubt [KEY-123], KEY-123, KEY-123: ...
     final reStart = RegExp(r'^\[?([A-Za-z][A-Za-z0-9]+-\d+)\]?:?', caseSensitive: false);
     final m = reStart.firstMatch(cleaned);
     if (m != null) return m.group(1)!.toUpperCase();
-
-    // Fallback: irgendwo in der ersten Zeile
     final m2 = RegExp(r'([A-Za-z][A-Za-z0-9]+-\d+)', caseSensitive: false).firstMatch(line);
     return m2?.group(1)?.toUpperCase();
   }
 
   String _firstLine(String s) => s.split('\n').first.trim();
 
-  // ⬇️ E-Mail-Liste aus Settings (komma/leerzeichen-getrennt); fallback auf Jira-E-Mail
   Set<String> _emailsFromSettings(SettingsModel s) {
     final raw = (s.gitlabAuthorEmail.trim().isEmpty ? s.jiraEmail : s.gitlabAuthorEmail).trim();
     final parts = raw.split(RegExp(r'[,\s]+')).map((e) => e.trim().toLowerCase()).where((e) => e.contains('@')).toSet();
     return parts;
   }
 
-  // ⬇️ Striktes Post-Filtering: nur Commits, deren author_email ODER committer_email in [emails] ist
   List<GitlabCommit> _filterCommitsByEmails(List<GitlabCommit> commits, Set<String> emails) {
     if (emails.isEmpty) return commits;
     return commits.where((c) {
@@ -214,7 +213,6 @@ class _HomePageState extends State<HomePage> {
     }).toList();
   }
 
-  // ✅ Aus allen geladenen Commits (state.gitlabCommits) eine sortierte Liste mit Ticket bauen
   List<_CT> _sortedCommitsWithTickets(List<GitlabCommit> commits) {
     final out = <_CT>[];
     for (final c in commits) {
@@ -226,7 +224,6 @@ class _HomePageState extends State<HomePage> {
     return out;
   }
 
-  // ✅ Logge alle „beachteten“ Commits pro Tag
   void _logCommitsForDay(DateTime day, List<_CT> ordered, void Function(String) log) {
     final ds = DateTime(day.year, day.month, day.day);
     final de = ds.add(const Duration(days: 1));
@@ -241,7 +238,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // ✅ Suche „letztes Ticket“ vor einem Zeitpunkt
   String? _lastTicketBefore(List<_CT> ordered, DateTime t) {
     int lo = 0, hi = ordered.length - 1, idx = -1;
     while (lo <= hi) {
@@ -256,7 +252,6 @@ class _HomePageState extends State<HomePage> {
     return idx >= 0 ? ordered[idx].ticket : null;
   }
 
-  // ⬇️ Rest-Intervalle anhand Commit-Wechsel aufsplitten und mit Ticket versehen
   List<DraftLog> _assignRestPiecesByCommits({
     required List<WorkWindow> pieces,
     required List<_CT> ordered,
@@ -284,8 +279,8 @@ class _HomePageState extends State<HomePage> {
       }
 
       if (currentTicket == null) {
-        log('    ⚠ Keine passenden Commits – Rest ${DateFormat('HH:mm').format(piece.start)}–${DateFormat('HH:mm').format(piece.end)} wird ausgelassen\n');
-        continue; // KEIN Fallback (dein Wunsch)
+        log('    ⚠ Keine passenden Commits – Arbeit ${DateFormat('HH:mm').format(piece.start)}–${DateFormat('HH:mm').format(piece.end)} wird ausgelassen\n');
+        continue;
       }
 
       final inside = ordered.where((c) => c.at.isAfter(piece.start) && c.at.isBefore(piece.end)).toList();
@@ -294,7 +289,7 @@ class _HomePageState extends State<HomePage> {
         if (c.ticket != currentTicket) {
           if (c.at.isAfter(segStart)) {
             drafts.add(DraftLog(start: segStart, end: c.at, issueKey: currentTicket!, note: note));
-            log('    Rest ${DateFormat('HH:mm').format(segStart)}–${DateFormat('HH:mm').format(c.at)} → [$currentTicket] (Commit ${DateFormat('HH:mm').format(c.at)})\n');
+            log('    Arbeit ${DateFormat('HH:mm').format(segStart)}–${DateFormat('HH:mm').format(c.at)} → [$currentTicket] (Commit ${DateFormat('HH:mm').format(c.at)})\n');
           }
           currentTicket = c.ticket;
           segStart = c.at;
@@ -303,11 +298,75 @@ class _HomePageState extends State<HomePage> {
 
       if (segEndTotal.isAfter(segStart)) {
         drafts.add(DraftLog(start: segStart, end: segEndTotal, issueKey: currentTicket!, note: note));
-        log('    Rest ${DateFormat('HH:mm').format(segStart)}–${DateFormat('HH:mm').format(segEndTotal)} → [$currentTicket]\n');
+        log('    Arbeit ${DateFormat('HH:mm').format(segStart)}–${DateFormat('HH:mm').format(segEndTotal)} → [$currentTicket]\n');
       }
     }
 
     return drafts;
+  }
+
+  // ---------------- Jira Summaries holen (Batch) ----------------
+
+  Future<Map<String, String>> _fetchJiraSummaries(Set<String> keys) async {
+    final s = context.read<AppState>().settings;
+    if (s.jiraBaseUrl.isEmpty || s.jiraEmail.isEmpty || s.jiraApiToken.isEmpty) return {};
+
+    final base = s.jiraBaseUrl.replaceAll(RegExp(r'/+$'), '');
+    final auth = base64Encode(utf8.encode('${s.jiraEmail}:${s.jiraApiToken}'));
+    final result = <String, String>{};
+
+    // Batches, um URL/Body klein zu halten
+    const batchSize = 50;
+    final list = keys.toList();
+
+    for (var i = 0; i < list.length; i += batchSize) {
+      final slice = list.sublist(i, (i + batchSize > list.length) ? list.length : i + batchSize);
+
+      // JQL z. B. key in (ABC-1,DEF-2)
+      final jql = 'key in (${slice.map((k) => k.trim()).join(',')})';
+
+      final uri = Uri.parse('$base/rest/api/3/search/jql');
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+
+      try {
+        final req = await client.postUrl(uri);
+        req.headers.set(HttpHeaders.authorizationHeader, 'Basic $auth');
+        req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+        req.headers.set(HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
+
+        final bodyJson = jsonEncode({
+          'jql': jql,
+          'fields': ['summary'],
+          'maxResults': slice.length,
+        });
+        req.add(utf8.encode(bodyJson));
+
+        final resp = await req.close().timeout(const Duration(seconds: 20));
+        final body = await utf8.decodeStream(resp);
+
+        if (resp.statusCode >= 200 && resp.statusCode < 300) {
+          final json = jsonDecode(body) as Map<String, dynamic>;
+          final issues = (json['issues'] as List?) ?? const [];
+          for (final it in issues) {
+            final m = it as Map<String, dynamic>;
+            final key = (m['key'] ?? '').toString();
+            final fields = (m['fields'] as Map?) ?? const {};
+            final summary = (fields['summary'] ?? '').toString();
+            if (key.isNotEmpty && summary.isNotEmpty) {
+              result[key] = summary;
+            }
+          }
+        } else {
+          _log += 'WARN Jira search ${resp.statusCode}: $body\n';
+        }
+      } catch (e) {
+        _log += 'WARN Jira search exception: $e\n';
+      } finally {
+        client.close(force: true);
+      }
+    }
+
+    return result;
   }
 
   @override
@@ -361,6 +420,11 @@ class _HomePageState extends State<HomePage> {
       (byDay[key] ??= []).add(d);
     }
     final dayKeys = byDay.keys.toList()..sort();
+
+    bool noteHasTitle(String note) => note.contains(' – ');
+
+    final meetingKey = context.read<AppState>().settings.meetingIssueKey;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12.0),
@@ -373,10 +437,15 @@ class _HomePageState extends State<HomePage> {
             for (final w in byDay[day]!)
               Padding(
                 padding: const EdgeInsets.only(left: 8, bottom: 2),
-                child: Text(
-                  '${w.issueKey}  ${_hhmm(w.start)}–${_hhmm(w.end)}  (${formatDuration(w.duration)})  ${w.note}',
-                  style: const TextStyle(fontFamily: 'monospace'),
-                ),
+                child: Builder(builder: (_) {
+                  // Nur bei Arbeits-Logs (nicht Meeting-Ticket) und nur,
+                  // wenn wir noch keinen Titel im note haben:
+                  final maybeTitle =
+                      (w.issueKey != meetingKey && !noteHasTitle(w.note)) ? (_jiraSummaryCache[w.issueKey] ?? '') : '';
+                  final line = '${w.issueKey}  ${_hhmm(w.start)}–${_hhmm(w.end)}  (${formatDuration(w.duration)})  '
+                      '${w.note}${maybeTitle.isNotEmpty ? ' – $maybeTitle' : ''}';
+                  return Text(line, style: const TextStyle(fontFamily: 'monospace'));
+                }),
               ),
             const Divider(),
           ],
@@ -482,8 +551,11 @@ class _HomePageState extends State<HomePage> {
                 final res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['ics']);
                 if (res != null && res.files.single.path != null) {
                   final content = await File(res.files.single.path!).readAsString();
-                  final parsed = parseIcs(content);
+                  if (!context.mounted) return;
+                  final userMail = context.read<AppState>().settings.jiraEmail;
+                  final parsed = parseIcs(content, selfEmail: userMail);
                   clearIcsDayCache();
+                  clearIcsRangeCache();
                   setState(() {
                     context.read<AppState>().icsEvents = parsed.events;
                     _drafts = [];
@@ -507,6 +579,7 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildRangePicker(BuildContext context) {
     final state = context.watch<AppState>();
+    final activeRange = state.range;
     final dates = {
       ...state.timetac.map((e) => e.date),
       ...state.icsEvents.map((e) => DateTime(e.start.year, e.start.month, e.start.day)),
@@ -530,7 +603,7 @@ class _HomePageState extends State<HomePage> {
                         context: context,
                         firstDate: minDate.subtract(const Duration(days: 365)),
                         lastDate: maxDate.add(const Duration(days: 365)),
-                        initialDateRange: context.read<AppState>().range ?? DateTimeRange(start: minDate, end: maxDate),
+                        initialDateRange: activeRange ?? DateTimeRange(start: minDate, end: maxDate),
                         helpText: 'Bitte Zeitraum wählen',
                       );
                       if (picked != null) {
@@ -542,9 +615,12 @@ class _HomePageState extends State<HomePage> {
                       }
                     },
               icon: const Icon(Icons.calendar_today),
-              label: Text(context.watch<AppState>().range == null
-                  ? 'Zeitraum wählen'
-                  : '${DateFormat('dd.MM.yyyy').format(context.watch<AppState>().range!.start)} – ${DateFormat('dd.MM.yyyy').format(context.watch<AppState>().range!.end)}'),
+              label: Text(
+                activeRange == null
+                    ? 'Zeitraum wählen'
+                    : '${DateFormat('dd.MM.yyyy').format(activeRange.start)} – '
+                        '${DateFormat('dd.MM.yyyy').format(activeRange.end)}',
+              ),
             ),
           ]),
         ]),
@@ -579,7 +655,6 @@ class _HomePageState extends State<HomePage> {
     final pauseTotalCtl = TextEditingController(text: s.csvColPauseTotal);
     final pauseRangesCtl = TextEditingController(text: s.csvColPauseRanges);
 
-    // ✨ GitLab
     final glBaseCtl = TextEditingController(text: s.gitlabBaseUrl);
     final glTokCtl = TextEditingController(text: s.gitlabToken);
     final glProjCtl = TextEditingController(text: s.gitlabProjectIds);
@@ -598,7 +673,7 @@ class _HomePageState extends State<HomePage> {
               const SizedBox(height: 16),
               Align(
                   alignment: Alignment.centerLeft,
-                  child: Text('Jira REST', style: Theme.of(context).textTheme.titleSmall)),
+                  child: Text('Jira Arbeit', style: Theme.of(context).textTheme.titleSmall)),
               TextFormField(
                   decoration: const InputDecoration(labelText: 'Jira Base URL (https://…atlassian.net)'),
                   controller: baseCtl),
@@ -671,7 +746,7 @@ class _HomePageState extends State<HomePage> {
               Align(
                   alignment: Alignment.centerLeft,
                   child:
-                      Text('GitLab (für Rest-Zeit Ticket-Automatik)', style: Theme.of(context).textTheme.titleSmall)),
+                      Text('GitLab (für Arbeitszeit Ticket-Automatik)', style: Theme.of(context).textTheme.titleSmall)),
               TextFormField(
                   decoration: const InputDecoration(labelText: 'GitLab Base URL (https://gitlab.example.com)'),
                   controller: glBaseCtl),
@@ -723,7 +798,6 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-// Füge diese komplette Funktion in deine _HomePageState-Klasse ein
   Future<void> _calculate(BuildContext context) async {
     final state = context.read<AppState>();
     setState(() {
@@ -733,19 +807,17 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      // --------- CSV-Tage & Zeitraum bestimmen ----------
-      final csvDaysSet = state.timetac.map((t) => DateTime(t.date.year, t.date.month, t.date.day)).toSet();
+      clearIcsDayCache(); // defensiv
 
+      final csvDaysSet = state.timetac.map((t) => DateTime(t.date.year, t.date.month, t.date.day)).toSet();
       if (csvDaysSet.isEmpty) {
         _log += 'Hinweis: Keine CSV-Daten geladen.\n';
-        setState(() {
-          _busy = false;
-        });
+        setState(() => _busy = false);
         return;
       }
 
       var csvDays = csvDaysSet.toList()..sort();
-      DateTime rangeStart, rangeEnd;
+      late DateTime rangeStart, rangeEnd;
 
       if (state.range != null) {
         rangeStart = DateTime(state.range!.start.year, state.range!.start.month, state.range!.start.day);
@@ -759,31 +831,34 @@ class _HomePageState extends State<HomePage> {
       }
 
       _log += 'CSV-Tage erkannt: ${csvDaysSet.length} (im Zeitraum: ${csvDays.length})\n';
-
-      // Wenn im Zeitraum keine CSV-Tage – abbrechen.
       if (csvDays.isEmpty) {
         _log += 'Hinweis: Im gewählten Zeitraum wurden keine CSV-Tage gefunden.\n';
-        setState(() {
-          _busy = false;
-        });
+        setState(() => _busy = false);
         return;
       }
 
-      // ------- GitLab laden (mit Lookback) & korrekt über alle Projekte mergen -------
+      // ⚡ Meetings für den Zeitraum vorbereiten (Fast-Cache)
+      prepareUserMeetingsRange(
+        allEvents: state.icsEvents,
+        userEmail: state.settings.jiraEmail,
+        from: rangeStart,
+        to: rangeEnd,
+      );
+
+      // GitLab
       final s = state.settings;
       final lookbackStart = rangeStart.subtract(Duration(days: s.gitlabLookbackDays));
       final until = rangeEnd.add(const Duration(days: 1));
       final authorEmails = _emailsFromSettings(s);
 
       List<_CT> ordered = [];
-      state.gitlabCommits = []; // clear cache
+      state.gitlabCommits = [];
 
       if (s.gitlabBaseUrl.isNotEmpty && s.gitlabToken.isNotEmpty && s.gitlabProjectIds.isNotEmpty) {
         final api = GitlabApi(baseUrl: s.gitlabBaseUrl, token: s.gitlabToken);
         final ids =
             s.gitlabProjectIds.split(RegExp(r'[,\s]+')).map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
 
-        // ⬇️ FIX: erst lokal sammeln, NICHT innerhalb der Schleife überschreiben
         final allFetched = <GitlabCommit>[];
         final perProject = <String, int>{};
         int totalFetched = 0;
@@ -793,14 +868,13 @@ class _HomePageState extends State<HomePage> {
             projectId: id,
             since: lookbackStart,
             until: until,
-            authorEmail: authorEmails.isNotEmpty ? authorEmails.first : null,
+            authorEmail: null, // clientseitig filtern
           );
-          allFetched.addAll(commits); // <-- sammle für ALLE Projekte
+          allFetched.addAll(commits);
           totalFetched += commits.length;
           perProject[id] = (perProject[id] ?? 0) + commits.length;
         }
 
-        // jetzt EINMAL ins State schreiben und danach filtern
         state.gitlabCommits = allFetched;
 
         _log += 'GitLab-Commits geladen: $totalFetched\n';
@@ -808,7 +882,6 @@ class _HomePageState extends State<HomePage> {
           _log += '  • Projekt $id: ${perProject[id] ?? 0}\n';
         }
 
-        // striktes Post-Filter nach deinen E-Mails
         final before = state.gitlabCommits.length;
         final filtered = _filterCommitsByEmails(state.gitlabCommits, authorEmails);
         final after = filtered.length;
@@ -821,22 +894,16 @@ class _HomePageState extends State<HomePage> {
         _log += 'GitLab deaktiviert – kein Commit-basiertes Routing.\n';
       }
 
-      // --------- Drafts je Tag bauen ----------
       final allDrafts = <DraftLog>[];
 
       for (final day in csvDays) {
-        // Commit-Log pro Tag (nur die beachteten, also nach Filter & mit Ticket)
         if (ordered.isNotEmpty) {
           _logCommitsForDay(day, ordered, (s) => _log += s);
-        } else {
-          _log += '  Commits: —\n';
         }
 
-        // Arbeitsfenster inkl. Pausenabzug
         final workWindows = state.workWindowsForDay(day);
         final productiveDur = workWindows.fold<Duration>(Duration.zero, (p, w) => p + w.duration);
 
-        // Outlook ggf. ignorieren (Urlaub/0h)
         final rowsForDay = state.timetac
             .where((r) => r.date.year == day.year && r.date.month == day.month && r.date.day == day.day)
             .toList();
@@ -846,45 +913,39 @@ class _HomePageState extends State<HomePage> {
               return d.contains('urlaub') || d.contains('feiertag') || d.contains('krank') || d.contains('abwesen');
             });
 
-        // Meetings aus ICS schneiden (nur wenn nicht ignoriert)
-        final meetings = ignoreOutlook
-            ? <WorkWindow>[]
-            : buildDayCalendarCached(allEvents: state.icsEvents, day: day)
-                .meetings
-                .map((e) => WorkWindow(e.start, e.end))
-                .toList();
-
-        // Meeting-Drafts (auf Arbeitsfenster begrenzen)
+        final meetingCutters = <WorkWindow>[];
         final meetingDrafts = <DraftLog>[];
-        for (final m in meetings) {
-          for (final w in workWindows) {
-            final s1 = m.start.isAfter(w.start) ? m.start : w.start;
-            final e1 = m.end.isBefore(w.end) ? m.end : w.end;
-            if (e1.isAfter(s1)) {
-              meetingDrafts.add(DraftLog(
-                start: s1,
-                end: e1,
-                issueKey: state.settings.meetingIssueKey,
-                note: 'Meeting ${DateFormat('HH:mm').format(s1)}–${DateFormat('HH:mm').format(e1)}',
-              ));
+        if (!ignoreOutlook) {
+          final events = meetingsForUserOnDayFast(day: day, userEmail: state.settings.jiraEmail);
+          for (final e in events) {
+            meetingCutters.add(WorkWindow(e.start, e.end));
+            for (final w in workWindows) {
+              final s1 = e.start.isAfter(w.start) ? e.start : w.start;
+              final e1 = e.end.isBefore(w.end) ? e.end : w.end;
+              if (e1.isAfter(s1)) {
+                final title = (e.summary.trim().isEmpty) ? '' : ' – ${e.summary.trim()}';
+                meetingDrafts.add(DraftLog(
+                  start: s1,
+                  end: e1,
+                  issueKey: state.settings.meetingIssueKey,
+                  note: 'Meeting$title',
+                ));
+              }
             }
           }
         }
 
-        // Rest = Arbeitsfenster minus Meetings
         final restPieces = <WorkWindow>[];
         for (final w in workWindows) {
-          restPieces.addAll(subtractIntervals(w, meetings));
+          restPieces.addAll(subtractIntervals(w, meetingCutters));
         }
 
-        // Rest-Zuordnung: immer „letztes Ticket“ (über Tage), Splits an Commit-Wechseln
         final restDrafts = ordered.isEmpty
-            // kein Fallback gewünscht → wenn keine Commits, dann keine Rest-Logs
             ? <DraftLog>[]
             : _assignRestPiecesByCommits(
                 pieces: restPieces,
                 ordered: ordered,
-                note: 'Rest',
+                note: 'Arbeit',
                 log: (s) => _log += s,
               );
 
@@ -906,15 +967,44 @@ class _HomePageState extends State<HomePage> {
             '${ordered.isNotEmpty ? 'GitLab aktiv ($dayTicketCount/${ordered.length})' : 'GitLab aus'}\n';
       }
 
+      // -------- Jira Summaries anhängen (nur Arbeits-Logs, nicht Meetings) --------
+      final nonMeetingKeys =
+          allDrafts.where((d) => d.issueKey != state.settings.meetingIssueKey).map((d) => d.issueKey).toSet();
+
+      Map<String, String> summaries = {};
+      if (nonMeetingKeys.isNotEmpty) {
+        summaries = await _fetchJiraSummaries(nonMeetingKeys);
+        _log += 'Jira Summaries geholt: ${summaries.length}/${nonMeetingKeys.length}\n';
+      }
+
+      _jiraSummaryCache = summaries;
+
+      final enrichedDrafts = <DraftLog>[];
+      for (final d in allDrafts) {
+        if (d.issueKey != state.settings.meetingIssueKey) {
+          final title = summaries[d.issueKey];
+          if (title != null && title.trim().isNotEmpty) {
+            enrichedDrafts.add(DraftLog(
+              start: d.start,
+              end: d.end,
+              issueKey: d.issueKey,
+              note: '${d.note} – $title',
+            ));
+            continue;
+          }
+        }
+        enrichedDrafts.add(d);
+      }
+
       setState(() {
-        _drafts = allDrafts;
+        _drafts = enrichedDrafts;
       });
 
-      if (allDrafts.isEmpty) {
+      if (enrichedDrafts.isEmpty) {
         _log += 'Hinweis: Keine Worklogs erzeugt. Prüfe CSV/ICS, Zeitraum und Commit-Filter.\n';
       }
 
-      _log += 'Drafts: ${allDrafts.length}\n';
+      _log += 'Drafts: ${enrichedDrafts.length}\n';
     } catch (e, st) {
       _log += 'EXCEPTION in Berechnung: $e\n$st\n';
     } finally {
@@ -927,15 +1017,11 @@ class _HomePageState extends State<HomePage> {
   Future<void> _bookToJira(BuildContext context) async {
     final state = context.read<AppState>();
     if (_drafts.isEmpty) {
-      setState(() {
-        _log += 'Keine Worklogs zu senden.\n';
-      });
+      setState(() => _log += 'Keine Worklogs zu senden.\n');
       return;
     }
     if (state.settings.jiraBaseUrl.isEmpty || state.settings.jiraEmail.isEmpty || state.settings.jiraApiToken.isEmpty) {
-      setState(() {
-        _log += 'FEHLER: Jira-Zugangsdaten fehlen.\n';
-      });
+      setState(() => _log += 'FEHLER: Jira-Zugangsdaten fehlen.\n');
       return;
     }
 
@@ -946,9 +1032,15 @@ class _HomePageState extends State<HomePage> {
 
     try {
       final jira = JiraApi(
-          baseUrl: state.settings.jiraBaseUrl, email: state.settings.jiraEmail, apiToken: state.settings.jiraApiToken);
+        baseUrl: state.settings.jiraBaseUrl,
+        email: state.settings.jiraEmail,
+        apiToken: state.settings.jiraApiToken,
+      );
       final worklogApi = JiraWorklogApi(
-          baseUrl: state.settings.jiraBaseUrl, email: state.settings.jiraEmail, apiToken: state.settings.jiraApiToken);
+        baseUrl: state.settings.jiraBaseUrl,
+        email: state.settings.jiraEmail,
+        apiToken: state.settings.jiraApiToken,
+      );
 
       final keys = _drafts.map((d) => d.issueKey).toSet().toList();
       final keyToId = <String, String>{};
@@ -983,9 +1075,7 @@ class _HomePageState extends State<HomePage> {
       _log += '\nFertig. Erfolgreich: $ok, Fehler: $fail\n';
       setState(() {});
     } catch (e, st) {
-      setState(() {
-        _log += 'EXCEPTION beim Senden: $e\n$st\n';
-      });
+      setState(() => _log += 'EXCEPTION beim Senden: $e\n$st\n');
     } finally {
       setState(() {
         _busy = false;

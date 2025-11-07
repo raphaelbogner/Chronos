@@ -17,7 +17,7 @@ class PreviewTable extends StatelessWidget {
             Expanded(child: Text('Datum', style: TextStyle(fontWeight: FontWeight.bold))),
             Expanded(child: Text('Timetac', style: TextStyle(fontWeight: FontWeight.bold))),
             Expanded(child: Text('Meetings', style: TextStyle(fontWeight: FontWeight.bold))),
-            Expanded(child: Text('Rest', style: TextStyle(fontWeight: FontWeight.bold))),
+            Expanded(child: Text('Arbeit', style: TextStyle(fontWeight: FontWeight.bold))),
           ]),
           const Divider(),
           for (final d in days)

@@ -7,6 +7,15 @@ class WorkWindow {
   Duration get duration => end.difference(start);
 }
 
+class MeetingWindow extends WorkWindow {
+  MeetingWindow(
+    super.start,
+    super.end,
+    this.title,
+  );
+  String title;
+}
+
 class DraftLog {
   DraftLog({required this.start, required this.end, required this.issueKey, required this.note});
   DateTime start;
@@ -14,6 +23,27 @@ class DraftLog {
   String issueKey;
   String note;
   Duration get duration => end.difference(start);
+}
+
+/// Merged überlappende oder direkt aneinanderstoßende Intervalle (Union).
+List<WorkWindow> mergeWorkWindows(List<WorkWindow> windows) {
+  if (windows.isEmpty) return const <WorkWindow>[];
+  final sorted = List<WorkWindow>.from(windows)..sort((a, b) => a.start.compareTo(b.start));
+
+  final merged = <WorkWindow>[sorted.first];
+  for (var i = 1; i < sorted.length; i++) {
+    final last = merged.last;
+    final cur = sorted[i];
+
+    // "touchesOrOverlaps": cur.start <= last.end  → zusammenführen
+    if (!cur.start.isAfter(last.end)) {
+      final newEnd = cur.end.isAfter(last.end) ? cur.end : last.end;
+      merged[merged.length - 1] = WorkWindow(last.start, newEnd);
+    } else {
+      merged.add(cur);
+    }
+  }
+  return merged;
 }
 
 List<WorkWindow> subtractIntervals(WorkWindow base, List<WorkWindow> cutters) {
@@ -40,13 +70,13 @@ List<WorkWindow> subtractIntervals(WorkWindow base, List<WorkWindow> cutters) {
   return pieces.where((w) => w.duration.inSeconds >= 60).toList();
 }
 
-/// Optionaler Resolver, der für ein Rest-Intervall die Issue bestimmt (z. B. via GitLab)
+/// Optionaler Resolver, der für ein Arbeitsintervall die Issue bestimmt (z. B. via GitLab)
 typedef FallbackIssueResolver = String? Function(DateTime start, DateTime end);
 
 List<DraftLog> buildDraftsForDay({
   required DateTime day,
   required List<WorkWindow> workWindows,
-  required List<WorkWindow> meetings,
+  required List<MeetingWindow> meetings,
   required String meetingIssueKey,
   required String fallbackIssueKey,
   required String? meetingNotePrefix,
@@ -55,41 +85,45 @@ List<DraftLog> buildDraftsForDay({
 }) {
   final drafts = <DraftLog>[];
 
-  for (final m in meetings) {
-    final meetingPieces = workWindows
-        .map((w) {
-          final s = m.start.isAfter(w.start) ? m.start : w.start;
-          final e = m.end.isBefore(w.end) ? m.end : w.end;
-          return e.isAfter(s) ? WorkWindow(s, e) : null;
-        })
-        .nonNulls
-        .toList();
+  // ✨ Neu: Meetings zuerst union-mergen (verhindert künstliche Verlängerungen oder Doppelabzüge)
+  final mergedMeetings =
+      mergeWorkWindows(meetings).map((w) => w is MeetingWindow ? w : MeetingWindow(w.start, w.end, '')).toList();
 
-    for (final piece in meetingPieces) {
-      drafts.add(DraftLog(
-        start: piece.start,
-        end: piece.end,
-        issueKey: meetingIssueKey,
-        note: '${meetingNotePrefix ?? 'Meeting'} ${_hhmm(piece.start)}–${_hhmm(piece.end)}',
-      ));
+  // Meetings: auf Arbeitsfenster clippen
+  for (final m in mergedMeetings) {
+    for (final w in workWindows) {
+      final s = m.start.isAfter(w.start) ? m.start : w.start;
+      final e = m.end.isBefore(w.end) ? m.end : w.end;
+      if (e.isAfter(s)) {
+        final label = meetingNotePrefix ?? 'Meeting';
+        final title = (m.title.trim().isEmpty) ? '' : ' – ${m.title.trim()}';
+        drafts.add(DraftLog(
+          start: s,
+          end: e,
+          issueKey: meetingIssueKey,
+          note: '$label ${_hhmm(s)}–${_hhmm(e)}$title',
+        ));
+      }
     }
   }
 
-  // Rest = Arbeitsfenster minus Meetings
+  // Arbeit = Arbeitsfenster minus (gemergte) Meetings
   final fallbackPieces = <WorkWindow>[];
   for (final w in workWindows) {
-    final cut = subtractIntervals(w, meetings);
-    fallbackPieces.addAll(cut);
+    final cuts = subtractIntervals(
+      w,
+      mergedMeetings.map((m) => WorkWindow(m.start, m.end)).toList(),
+    );
+    fallbackPieces.addAll(cuts);
   }
 
-  // Fallback auflösen (optional via Resolver), sonst fixed
   for (final piece in fallbackPieces) {
     final issue = fallbackResolver?.call(piece.start, piece.end) ?? fallbackIssueKey;
     drafts.add(DraftLog(
       start: piece.start,
       end: piece.end,
       issueKey: issue,
-      note: fallbackNote ?? 'Rest',
+      note: fallbackNote ?? 'Arbeit',
     ));
   }
 
