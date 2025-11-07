@@ -63,8 +63,32 @@ class AppState extends ChangeNotifier {
   Future<void> savePrefs() async {
     final p = await SharedPreferences.getInstance();
     await p.setString('settings', jsonEncode(settings.toJson()));
+    notifyListeners();
   }
 
+  // ---------- Konfig-Validierung ----------
+  bool get isJiraConfigured =>
+      settings.jiraBaseUrl.trim().isNotEmpty &&
+      settings.jiraEmail.trim().isNotEmpty &&
+      settings.jiraApiToken.trim().isNotEmpty;
+
+  bool get isTimetacConfigured =>
+      settings.csvDelimiter.trim().isNotEmpty &&
+      settings.csvColDate.trim().isNotEmpty &&
+      settings.csvColStart.trim().isNotEmpty &&
+      settings.csvColEnd.trim().isNotEmpty &&
+      settings.csvColDescription.trim().isNotEmpty &&
+      settings.csvColPauseTotal.trim().isNotEmpty &&
+      settings.csvColPauseRanges.trim().isNotEmpty;
+
+  bool get isGitlabConfigured =>
+      settings.gitlabBaseUrl.trim().isNotEmpty &&
+      settings.gitlabToken.trim().isNotEmpty &&
+      settings.gitlabProjectIds.trim().isNotEmpty;
+
+  bool get isAllConfigured => isJiraConfigured && isTimetacConfigured && isGitlabConfigured;
+
+  // ---------- CSV → Arbeitsfenster ----------
   static bool _isCsvAbsence(String desc) {
     final d = desc.toLowerCase();
     return d.contains('urlaub') || d.contains('feiertag') || d.contains('krank') || d.contains('abwesen');
@@ -306,7 +330,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ---------------- Jira Summaries holen (Batch) ----------------
-
   Future<Map<String, String>> _fetchJiraSummaries(Set<String> keys) async {
     final s = context.read<AppState>().settings;
     if (s.jiraBaseUrl.isEmpty || s.jiraEmail.isEmpty || s.jiraApiToken.isEmpty) return {};
@@ -315,35 +338,23 @@ class _HomePageState extends State<HomePage> {
     final auth = base64Encode(utf8.encode('${s.jiraEmail}:${s.jiraApiToken}'));
     final result = <String, String>{};
 
-    // Batches, um URL/Body klein zu halten
+    // In Batches (Jira: sinnvolle Grenze ~50)
     const batchSize = 50;
     final list = keys.toList();
-
     for (var i = 0; i < list.length; i += batchSize) {
       final slice = list.sublist(i, (i + batchSize > list.length) ? list.length : i + batchSize);
-
-      // JQL z. B. key in (ABC-1,DEF-2)
+      // neue JQL-Route (CHANGE-2046)
       final jql = 'key in (${slice.map((k) => k.trim()).join(',')})';
+      final uri = Uri.parse(
+          '$base/rest/api/3/search/jql?jql=${Uri.encodeQueryComponent(jql)}&fields=summary&maxResults=${slice.length}');
 
-      final uri = Uri.parse('$base/rest/api/3/search/jql');
       final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
-
       try {
-        final req = await client.postUrl(uri);
+        final req = await client.getUrl(uri);
         req.headers.set(HttpHeaders.authorizationHeader, 'Basic $auth');
         req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-        req.headers.set(HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
-
-        final bodyJson = jsonEncode({
-          'jql': jql,
-          'fields': ['summary'],
-          'maxResults': slice.length,
-        });
-        req.add(utf8.encode(bodyJson));
-
         final resp = await req.close().timeout(const Duration(seconds: 20));
         final body = await utf8.decodeStream(resp);
-
         if (resp.statusCode >= 200 && resp.statusCode < 300) {
           final json = jsonDecode(body) as Map<String, dynamic>;
           final issues = (json['issues'] as List?) ?? const [];
@@ -369,46 +380,148 @@ class _HomePageState extends State<HomePage> {
     return result;
   }
 
+  // ---------- UI ----------
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final locked = !state.isAllConfigured;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Timetac + Outlook → Jira Worklogs'),
-        actions: [IconButton(icon: const Icon(Icons.settings), onPressed: () => _openSettings(context))],
+        actions: [
+          _statusPill(state.isJiraConfigured, 'Jira'),
+          _statusPill(state.isTimetacConfigured, 'Timetac'),
+          _statusPill(state.isGitlabConfigured, 'GitLab'),
+          IconButton(icon: const Icon(Icons.settings), onPressed: () => _openSettings(context)),
+        ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(12),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _buildInputs(context),
-          const SizedBox(height: 12),
-          _buildImportButtons(context),
-          const SizedBox(height: 12),
-          _buildRangePicker(context),
-          const SizedBox(height: 12),
-          Row(children: [
-            FilledButton.icon(
-              onPressed: _busy ? null : () => _calculate(context),
-              icon: const Icon(Icons.calculate),
-              label: const Text('Berechnen'),
+      body: Stack(
+        children: [
+          AbsorbPointer(
+            absorbing: locked || _busy,
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(12),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                _buildInputs(context),
+                const SizedBox(height: 12),
+                _buildImportButtons(context),
+                const SizedBox(height: 12),
+                _buildRangePicker(context),
+                const SizedBox(height: 12),
+                Row(children: [
+                  FilledButton.icon(
+                    onPressed: locked ? null : () => _calculate(context),
+                    icon: const Icon(Icons.calculate),
+                    label: const Text('Berechnen'),
+                  ),
+                  const SizedBox(width: 12),
+                  FilledButton.icon(
+                    onPressed: locked || _drafts.isEmpty ? null : () => _bookToJira(context),
+                    icon: const Icon(Icons.send),
+                    label: const Text('Buchen (Jira)'),
+                  ),
+                ]),
+                const SizedBox(height: 12),
+                if (state.totals.isNotEmpty) ...[
+                  Text('Vorschau Summen', style: Theme.of(context).textTheme.titleLarge),
+                  PreviewTable(days: state.totals),
+                ],
+                const SizedBox(height: 12),
+                if (_drafts.isNotEmpty) _plannedList(context, _drafts),
+                const SizedBox(height: 12),
+                if (_log.isNotEmpty) _buildLogBox(),
+              ]),
             ),
-            const SizedBox(width: 12),
-            FilledButton.icon(
-              onPressed: _busy || _drafts.isEmpty ? null : () => _bookToJira(context),
-              icon: const Icon(Icons.send),
-              label: const Text('Buchen (Jira)'),
+          ),
+          if (locked) _lockOverlay(context, state),
+          if (_busy) _busyOverlay(context),
+        ],
+      ),
+    );
+  }
+
+  // kleine Statusanzeige (Icon + Label darunter)
+  Widget _statusPill(bool ok, String label) {
+    final color = ok ? Colors.green : Colors.red;
+    final icon = ok ? Icons.check_circle : Icons.cancel;
+
+    return Semantics(
+      label: '$label ${ok ? "konfiguriert" : "fehlt"}',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: color, size: 20),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 10),
             ),
-          ]),
-          const SizedBox(height: 12),
-          if (state.totals.isNotEmpty) ...[
-            Text('Vorschau Summen', style: Theme.of(context).textTheme.titleLarge),
-            PreviewTable(days: state.totals),
           ],
-          const SizedBox(height: 12),
-          if (_drafts.isNotEmpty) _plannedList(context, _drafts),
-          const SizedBox(height: 12),
-          if (_log.isNotEmpty) _buildLogBox(),
-        ]),
+        ),
+      ),
+    );
+  }
+
+  // Overlay wenn gesperrt
+  Widget _lockOverlay(BuildContext context, AppState state) {
+    final missing = <String>[];
+    if (!state.isJiraConfigured) missing.add('Jira');
+    if (!state.isTimetacConfigured) missing.add('Timetac (CSV-Felder)');
+    if (!state.isGitlabConfigured) missing.add('GitLab');
+
+    return Container(
+      color: Colors.black54,
+      alignment: Alignment.center,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 520),
+        child: Card(
+          elevation: 8,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Text('🔒', style: TextStyle(fontSize: 48)),
+              const SizedBox(height: 8),
+              Text('App gesperrt – fehlende Einstellungen', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              Text(
+                'Bitte vervollständige die folgenden Bereiche in den Einstellungen:\n• ${missing.join('\n• ')}',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () => _openSettings(context),
+                icon: const Icon(Icons.settings),
+                label: const Text('Einstellungen öffnen'),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Overlay beim Berechnen/Senden
+  Widget _busyOverlay(BuildContext context) {
+    return Container(
+      color: Colors.black38,
+      alignment: Alignment.center,
+      child: Card(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: const Padding(
+          padding: EdgeInsets.all(20),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            SizedBox(width: 8),
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Text('Bitte warten…'),
+            SizedBox(width: 8),
+          ]),
+        ),
       ),
     );
   }
@@ -420,8 +533,6 @@ class _HomePageState extends State<HomePage> {
       (byDay[key] ??= []).add(d);
     }
     final dayKeys = byDay.keys.toList()..sort();
-
-    bool noteHasTitle(String note) => note.contains(' – ');
 
     final meetingKey = context.read<AppState>().settings.meetingIssueKey;
 
@@ -438,10 +549,7 @@ class _HomePageState extends State<HomePage> {
               Padding(
                 padding: const EdgeInsets.only(left: 8, bottom: 2),
                 child: Builder(builder: (_) {
-                  // Nur bei Arbeits-Logs (nicht Meeting-Ticket) und nur,
-                  // wenn wir noch keinen Titel im note haben:
-                  final maybeTitle =
-                      (w.issueKey != meetingKey && !noteHasTitle(w.note)) ? (_jiraSummaryCache[w.issueKey] ?? '') : '';
+                  final maybeTitle = (w.issueKey != meetingKey) ? (_jiraSummaryCache[w.issueKey] ?? '') : '';
                   final line = '${w.issueKey}  ${_hhmm(w.start)}–${_hhmm(w.end)}  (${formatDuration(w.duration)})  '
                       '${w.note}${maybeTitle.isNotEmpty ? ' – $maybeTitle' : ''}';
                   return Text(line, style: const TextStyle(fontFamily: 'monospace'));
@@ -640,7 +748,19 @@ class _HomePageState extends State<HomePage> {
   Future<void> _openSettings(BuildContext context) async {
     final s = context.read<AppState>().settings;
 
-    final tzCtl = TextEditingController(text: s.timezone);
+    // --- Timezone Dropdown + Custom ---
+    final tzOptions = <String>[
+      'Europe/Vienna',
+      'Europe/Berlin',
+      'Europe/Zurich',
+      'Europe/Paris',
+      'Europe/London',
+      'UTC',
+      'Custom…',
+    ];
+    String tzValue = tzOptions.contains(s.timezone) ? s.timezone : 'Custom…';
+    final tzCustomCtl = TextEditingController(text: tzValue == 'Custom…' ? s.timezone : '');
+
     final baseCtl = TextEditingController(text: s.jiraBaseUrl);
     final mailCtl = TextEditingController(text: s.jiraEmail);
     final jiraTokCtl = TextEditingController(text: s.jiraApiToken);
@@ -662,138 +782,176 @@ class _HomePageState extends State<HomePage> {
 
     await showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Einstellungen'),
-        content: SizedBox(
-          width: 680,
-          child: SingleChildScrollView(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              TextFormField(
-                  decoration: const InputDecoration(labelText: 'Timezone (z. B. Europe/Vienna)'), controller: tzCtl),
-              const SizedBox(height: 16),
-              Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text('Jira Arbeit', style: Theme.of(context).textTheme.titleSmall)),
-              TextFormField(
-                  decoration: const InputDecoration(labelText: 'Jira Base URL (https://…atlassian.net)'),
-                  controller: baseCtl),
-              TextFormField(decoration: const InputDecoration(labelText: 'Jira E-Mail'), controller: mailCtl),
-              TextFormField(
-                  decoration: const InputDecoration(labelText: 'Jira API Token'),
-                  controller: jiraTokCtl,
-                  obscureText: true),
-              const SizedBox(height: 16),
-              Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text('CSV (Timetac) – Importkonfiguration', style: Theme.of(context).textTheme.titleSmall)),
-              Row(children: [
-                Expanded(
-                    child: TextFormField(
-                        decoration: const InputDecoration(labelText: 'Delimiter (Standard: ;)'), controller: delimCtl)),
-                const SizedBox(width: 12),
-                Expanded(
-                    child: Row(children: [
-                  Checkbox(
-                      value: hasHeader,
-                      onChanged: (v) {
-                        hasHeader = v ?? false;
-                        (ctx as Element).markNeedsBuild();
-                      }),
-                  const Expanded(child: Text('Erste Zeile enthält Spaltennamen')),
-                ])),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) => AlertDialog(
+          title: const Text('Einstellungen'),
+          content: SizedBox(
+            width: 700,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                // Timezone Dropdown
+                Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('Allgemein', style: Theme.of(context).textTheme.titleSmall)),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  initialValue: tzValue,
+                  isExpanded: true,
+                  items: tzOptions.map((z) => DropdownMenuItem(value: z, child: Text(z))).toList(),
+                  onChanged: (v) {
+                    setDlg(() {
+                      tzValue = v ?? 'Europe/Vienna';
+                    });
+                  },
+                  decoration: const InputDecoration(labelText: 'Zeitzone'),
+                ),
+                if (tzValue == 'Custom…')
+                  TextFormField(
+                    controller: tzCustomCtl,
+                    decoration: const InputDecoration(labelText: 'Eigene Zeitzone (IANA, z. B. Europe/Vienna)'),
+                  ),
+                const SizedBox(height: 16),
+
+                // Jira
+                Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('Jira Arbeit', style: Theme.of(context).textTheme.titleSmall)),
+                TextFormField(
+                    decoration: const InputDecoration(labelText: 'Jira Base URL (https://…atlassian.net)'),
+                    controller: baseCtl),
+                TextFormField(decoration: const InputDecoration(labelText: 'Jira E-Mail'), controller: mailCtl),
+                TextFormField(
+                    decoration: const InputDecoration(labelText: 'Jira API Token'),
+                    controller: jiraTokCtl,
+                    obscureText: true),
+
+                const SizedBox(height: 16),
+
+                // CSV
+                Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('CSV (Timetac) – Importkonfiguration', style: Theme.of(context).textTheme.titleSmall)),
+                Row(children: [
+                  Expanded(
+                      child: TextFormField(
+                          decoration: const InputDecoration(labelText: 'Delimiter (Standard: ;)'),
+                          controller: delimCtl)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                      child: Row(children: [
+                    Checkbox(
+                        value: hasHeader,
+                        onChanged: (v) {
+                          hasHeader = v ?? false;
+                          (ctx as Element).markNeedsBuild();
+                        }),
+                    const Expanded(child: Text('Erste Zeile enthält Spaltennamen')),
+                  ])),
+                ]),
+                Row(children: [
+                  Expanded(
+                      child: TextFormField(
+                          decoration:
+                              const InputDecoration(labelText: 'Spalte: Beschreibung/Aktion (Standard: Kommentar)'),
+                          controller: descCtl)),
+                ]),
+                Row(children: [
+                  Expanded(
+                      child: TextFormField(
+                          decoration: const InputDecoration(labelText: 'Spalte: Datum (Standard: Datum)'),
+                          controller: dateCtl)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                      child: TextFormField(
+                          decoration: const InputDecoration(labelText: 'Spalte: Beginn (Standard: K)'),
+                          controller: startCtl)),
+                ]),
+                Row(children: [
+                  Expanded(
+                      child: TextFormField(
+                          decoration: const InputDecoration(labelText: 'Spalte: Ende (Standard: G)'),
+                          controller: endCtl)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                      child: TextFormField(
+                          decoration: const InputDecoration(labelText: 'Spalte: Dauer  (Standard: GIBA)'),
+                          controller: durCtl)),
+                ]),
+                Row(children: [
+                  Expanded(
+                      child: TextFormField(
+                          decoration: const InputDecoration(labelText: 'Spalte: Gesamtpause (Standard: P)'),
+                          controller: pauseTotalCtl)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                      child: TextFormField(
+                          decoration: const InputDecoration(labelText: 'Spalte: Pausen-Ranges (Standard: Pausen)'),
+                          controller: pauseRangesCtl)),
+                ]),
+
+                const SizedBox(height: 16),
+
+                // GitLab
+                Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('GitLab (für Arbeitszeit Ticket-Automatik)',
+                        style: Theme.of(context).textTheme.titleSmall)),
+                TextFormField(
+                    decoration: const InputDecoration(labelText: 'GitLab Base URL (https://gitlab.example.com)'),
+                    controller: glBaseCtl),
+                TextFormField(
+                    decoration: const InputDecoration(labelText: 'GitLab PRIVATE-TOKEN'),
+                    controller: glTokCtl,
+                    obscureText: true),
+                TextFormField(
+                    decoration: const InputDecoration(labelText: 'GitLab Projekt-IDs (Komma/Leerzeichen getrennt)'),
+                    controller: glProjCtl),
+                TextFormField(
+                    decoration: const InputDecoration(labelText: 'GitLab Author E-Mail (optional, Filter)'),
+                    controller: glMailCtl),
               ]),
-              Row(children: [
-                Expanded(
-                    child: TextFormField(
-                        decoration:
-                            const InputDecoration(labelText: 'Spalte: Beschreibung/Aktion  (Standard: Kommentar)'),
-                        controller: descCtl)),
-              ]),
-              Row(children: [
-                Expanded(
-                    child: TextFormField(
-                        decoration: const InputDecoration(labelText: 'Spalte: Datum (Standard: Datum)'),
-                        controller: dateCtl)),
-                const SizedBox(width: 12),
-                Expanded(
-                    child: TextFormField(
-                        decoration: const InputDecoration(labelText: 'Spalte: Beginn (Standard: K)'),
-                        controller: startCtl)),
-              ]),
-              Row(children: [
-                Expanded(
-                    child: TextFormField(
-                        decoration: const InputDecoration(labelText: 'Spalte: Ende (Standard: G)'),
-                        controller: endCtl)),
-                const SizedBox(width: 12),
-                Expanded(
-                    child: TextFormField(
-                        decoration: const InputDecoration(labelText: 'Spalte: Dauer  (Standard: GIBA)'),
-                        controller: durCtl)),
-              ]),
-              Row(children: [
-                Expanded(
-                    child: TextFormField(
-                        decoration: const InputDecoration(labelText: 'Spalte: Gesamtpause (Standard: P)'),
-                        controller: pauseTotalCtl)),
-                const SizedBox(width: 12),
-                Expanded(
-                    child: TextFormField(
-                        decoration: const InputDecoration(labelText: 'Spalte: Pausen-Ranges (Standard: Pausen)'),
-                        controller: pauseRangesCtl)),
-              ]),
-              const SizedBox(height: 16),
-              Align(
-                  alignment: Alignment.centerLeft,
-                  child:
-                      Text('GitLab (für Arbeitszeit Ticket-Automatik)', style: Theme.of(context).textTheme.titleSmall)),
-              TextFormField(
-                  decoration: const InputDecoration(labelText: 'GitLab Base URL (https://gitlab.example.com)'),
-                  controller: glBaseCtl),
-              TextFormField(
-                  decoration: const InputDecoration(labelText: 'GitLab PRIVATE-TOKEN'),
-                  controller: glTokCtl,
-                  obscureText: true),
-              TextFormField(
-                  decoration: const InputDecoration(labelText: 'GitLab Projekt-IDs (Komma/Leerzeichen getrennt)'),
-                  controller: glProjCtl),
-              TextFormField(
-                  decoration: const InputDecoration(labelText: 'GitLab Author E-Mail (optional, Filter)'),
-                  controller: glMailCtl),
-            ]),
+            ),
           ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Schließen')),
+            FilledButton(
+              onPressed: () async {
+                final st = context.read<AppState>().settings;
+
+                // Zeitzone
+                st.timezone = (tzValue == 'Custom…')
+                    ? (tzCustomCtl.text.trim().isEmpty ? 'Europe/Vienna' : tzCustomCtl.text.trim())
+                    : tzValue;
+
+                // Jira
+                st.jiraBaseUrl = baseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
+                st.jiraEmail = mailCtl.text.trim();
+                st.jiraApiToken = jiraTokCtl.text.trim();
+
+                // CSV
+                st.csvDelimiter = delimCtl.text.trim().isEmpty ? ';' : delimCtl.text.trim();
+                st.csvHasHeader = hasHeader;
+                st.csvColDescription = descCtl.text.trim();
+                st.csvColDate = dateCtl.text.trim();
+                st.csvColStart = startCtl.text.trim();
+                st.csvColEnd = endCtl.text.trim();
+                st.csvColDuration = durCtl.text.trim();
+                st.csvColPauseTotal = pauseTotalCtl.text.trim();
+                st.csvColPauseRanges = pauseRangesCtl.text.trim();
+
+                // GitLab
+                st.gitlabBaseUrl = glBaseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
+                st.gitlabToken = glTokCtl.text.trim();
+                st.gitlabProjectIds = glProjCtl.text.trim();
+                st.gitlabAuthorEmail = glMailCtl.text.trim();
+
+                await context.read<AppState>().savePrefs();
+                if (context.mounted) Navigator.pop(ctx);
+              },
+              child: const Text('Speichern'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Schließen')),
-          FilledButton(
-            onPressed: () async {
-              final s = context.read<AppState>().settings;
-              s.timezone = tzCtl.text.trim().isEmpty ? 'Europe/Vienna' : tzCtl.text.trim();
-              s.jiraBaseUrl = baseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
-              s.jiraEmail = mailCtl.text.trim();
-              s.jiraApiToken = jiraTokCtl.text.trim();
-
-              s.csvDelimiter = delimCtl.text.trim().isEmpty ? ';' : delimCtl.text.trim();
-              s.csvHasHeader = hasHeader;
-              s.csvColDescription = descCtl.text.trim();
-              s.csvColDate = dateCtl.text.trim();
-              s.csvColStart = startCtl.text.trim();
-              s.csvColEnd = endCtl.text.trim();
-              s.csvColDuration = durCtl.text.trim();
-              s.csvColPauseTotal = pauseTotalCtl.text.trim();
-              s.csvColPauseRanges = pauseRangesCtl.text.trim();
-
-              s.gitlabBaseUrl = glBaseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
-              s.gitlabToken = glTokCtl.text.trim();
-              s.gitlabProjectIds = glProjCtl.text.trim();
-              s.gitlabAuthorEmail = glMailCtl.text.trim();
-
-              await context.read<AppState>().savePrefs();
-              if (context.mounted) Navigator.pop(ctx);
-            },
-            child: const Text('Speichern'),
-          ),
-        ],
       ),
     );
   }
@@ -928,7 +1086,7 @@ class _HomePageState extends State<HomePage> {
                   start: s1,
                   end: e1,
                   issueKey: state.settings.meetingIssueKey,
-                  note: 'Meeting$title',
+                  note: 'Meeting ${DateFormat('HH:mm').format(s1)}–${DateFormat('HH:mm').format(e1)}$title',
                 ));
               }
             }
@@ -967,7 +1125,7 @@ class _HomePageState extends State<HomePage> {
             '${ordered.isNotEmpty ? 'GitLab aktiv ($dayTicketCount/${ordered.length})' : 'GitLab aus'}\n';
       }
 
-      // -------- Jira Summaries anhängen (nur Arbeits-Logs, nicht Meetings) --------
+      // -------- Jira Summaries anhängen (nur Arbeits-Logs) --------
       final nonMeetingKeys =
           allDrafts.where((d) => d.issueKey != state.settings.meetingIssueKey).map((d) => d.issueKey).toSet();
 
@@ -1020,7 +1178,7 @@ class _HomePageState extends State<HomePage> {
       setState(() => _log += 'Keine Worklogs zu senden.\n');
       return;
     }
-    if (state.settings.jiraBaseUrl.isEmpty || state.settings.jiraEmail.isEmpty || state.settings.jiraApiToken.isEmpty) {
+    if (!state.isJiraConfigured) {
       setState(() => _log += 'FEHLER: Jira-Zugangsdaten fehlen.\n');
       return;
     }
