@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'models/models.dart';
 import 'services/csv_parser.dart';
@@ -872,181 +873,433 @@ class _HomePageState extends State<HomePage> {
 
     await showDialog(
       context: context,
+      useSafeArea: true,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDlg) => AlertDialog(
-          title: const Text('Einstellungen'),
-          content: SizedBox(
-            width: 700,
-            child: SingleChildScrollView(
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                // Jira
-                Align(
+        builder: (ctx, setDlg) => DefaultTabController(
+          length: 3,
+          child: LayoutBuilder(
+            builder: (c, cons) {
+              final media = MediaQuery.of(c);
+              final maxW = media.size.width - 32;
+              final maxH = media.size.height - 32;
+              final dialogW = maxW.clamp(360.0, 920.0);
+              final dialogH = (maxH * 0.88).clamp(360.0, 820.0);
+              final bottomInset = media.viewInsets.bottom;
+
+              void markRebuild(void Function(void Function()) s) => s(() {});
+
+              bool jiraOk() => context.read<AppState>().isJiraConfigured;
+              bool timetacOk() => context.read<AppState>().isTimetacConfigured;
+              bool gitlabOk() => context.read<AppState>().isGitlabConfigured;
+
+              Widget settingsIcon(bool ok) => Icon(
+                    ok ? Icons.check_circle : Icons.cancel,
+                    size: 18,
+                    color: ok ? Colors.green : Colors.red,
+                  );
+
+              Widget sectionTitle(BuildContext ctx, String t) => Align(
                     alignment: Alignment.centerLeft,
-                    child: Text('Jira Arbeit', style: Theme.of(context).textTheme.titleSmall)),
-                TextFormField(
-                    decoration: const InputDecoration(labelText: 'Jira Base URL (https://…atlassian.net)'),
-                    controller: baseCtl),
-                TextFormField(decoration: const InputDecoration(labelText: 'Jira E-Mail'), controller: mailCtl),
-                TextFormField(
-                    decoration: const InputDecoration(labelText: 'Jira API Token'),
-                    controller: jiraTokCtl,
-                    obscureText: true),
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 8.0, bottom: 4.0),
+                      child: Text(t, style: Theme.of(ctx).textTheme.titleSmall),
+                    ),
+                  );
 
-                const SizedBox(height: 16),
+              return Dialog(
+                insetPadding: const EdgeInsets.all(16),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: dialogW,
+                    maxHeight: dialogH,
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        // Titelzeile
+                        Row(
+                          children: [
+                            const Expanded(
+                              child: Text('Einstellungen', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
+                            ),
+                            IconButton(
+                              tooltip: 'Schließen',
+                              onPressed: () => Navigator.pop(ctx),
+                              icon: const Icon(Icons.close),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
 
-                // CSV
-                Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text('CSV (Timetac) – Importkonfiguration', style: Theme.of(context).textTheme.titleSmall)),
-                Row(children: [
-                  Expanded(
-                      child: TextFormField(
-                          decoration: const InputDecoration(labelText: 'Delimiter (Standard: ;)'),
-                          controller: delimCtl)),
-                  const SizedBox(width: 12),
-                  Expanded(
-                      child: Row(children: [
-                    Checkbox(
-                        value: hasHeader,
-                        onChanged: (v) {
-                          hasHeader = v ?? false;
-                          (ctx as Element).markNeedsBuild();
-                        }),
-                    const Expanded(child: Text('Erste Zeile enthält Spaltennamen')),
-                  ])),
-                ]),
-                Row(children: [
-                  Expanded(
-                      child: TextFormField(
-                          decoration:
-                              const InputDecoration(labelText: 'Spalte: Beschreibung/Aktion (Standard: Kommentar)'),
-                          controller: descCtl)),
-                ]),
-                Row(children: [
-                  Expanded(
-                      child: TextFormField(
-                          decoration: const InputDecoration(labelText: 'Spalte: Datum (Standard: Datum)'),
-                          controller: dateCtl)),
-                  const SizedBox(width: 12),
-                  Expanded(
-                      child: TextFormField(
-                          decoration: const InputDecoration(labelText: 'Spalte: Beginn (Standard: K)'),
-                          controller: startCtl)),
-                ]),
-                Row(children: [
-                  Expanded(
-                      child: TextFormField(
-                          decoration: const InputDecoration(labelText: 'Spalte: Ende (Standard: G)'),
-                          controller: endCtl)),
-                  const SizedBox(width: 12),
-                  Expanded(
-                      child: TextFormField(
-                          decoration: const InputDecoration(labelText: 'Spalte: Dauer  (Standard: GIBA)'),
-                          controller: durCtl)),
-                ]),
-                Row(children: [
-                  Expanded(
-                      child: TextFormField(
-                          decoration: const InputDecoration(labelText: 'Spalte: Gesamtpause (Standard: P)'),
-                          controller: pauseTotalCtl)),
-                  const SizedBox(width: 12),
-                  Expanded(
-                      child: TextFormField(
-                          decoration: const InputDecoration(labelText: 'Spalte: Pausen-Ranges (Standard: Pausen)'),
-                          controller: pauseRangesCtl)),
-                ]),
-                Row(children: [
-                  Expanded(
-                      child: TextFormField(
-                          decoration: const InputDecoration(labelText: 'Spalte: Krankheitstage (Standard: KT)'),
-                          controller: ktCtl)),
-                  const SizedBox(width: 12),
-                  Expanded(
-                      child: TextFormField(
-                          decoration: const InputDecoration(labelText: 'Spalte: Feiertage (Standard: FT)'),
-                          controller: ftCtl)),
-                ]),
-                Row(children: [
-                  Expanded(
-                      child: TextFormField(
-                          decoration: const InputDecoration(labelText: 'Spalte: Urlaubsstunden (Standard: UT)'),
-                          controller: utCtl)),
-                  const SizedBox(width: 12),
-                  Expanded(
-                      child: TextFormField(
-                          decoration:
-                              const InputDecoration(labelText: 'Spalte: Gesamte Nichtarbeitszeit (Standard: BNA)'),
-                          controller: bnaCtl)),
-                ]),
-                Row(children: [
-                  Expanded(
-                      child: TextFormField(
-                          decoration: const InputDecoration(labelText: 'Spalte: Zeitausgleich (Standard: ZA)'),
-                          controller: zaCtl)),
-                ]),
+                        // Tabs mit Live-Status
+                        TabBar(
+                          isScrollable: true,
+                          tabs: [
+                            Tab(
+                                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              settingsIcon(jiraOk()),
+                              const SizedBox(width: 6),
+                              const Text('Jira'),
+                            ])),
+                            Tab(
+                                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              settingsIcon(timetacOk()),
+                              const SizedBox(width: 6),
+                              const Text('Timetac'),
+                            ])),
+                            Tab(
+                                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              settingsIcon(gitlabOk()),
+                              const SizedBox(width: 6),
+                              const Text('GitLab'),
+                            ])),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
 
-                const SizedBox(height: 16),
+                        // Flexibler, scrollbarerer Inhalt
+                        Expanded(
+                          child: Padding(
+                            padding: EdgeInsets.only(bottom: bottomInset),
+                            child: TabBarView(
+                              physics: const NeverScrollableScrollPhysics(),
+                              children: [
+                                // ------- JIRA -------
+                                SingleChildScrollView(
+                                  child: Column(
+                                    children: [
+                                      sectionTitle(ctx, 'Jira Arbeit'),
+                                      TextFormField(
+                                        decoration: const InputDecoration(
+                                          labelText: 'Jira Base URL (https://…atlassian.net)',
+                                        ),
+                                        controller: baseCtl,
+                                        onChanged: (_) => markRebuild(setDlg),
+                                      ),
+                                      TextFormField(
+                                        decoration: const InputDecoration(labelText: 'Jira E-Mail'),
+                                        controller: mailCtl,
+                                        onChanged: (_) => markRebuild(setDlg),
+                                      ),
+                                      TextFormField(
+                                        decoration: const InputDecoration(labelText: 'Jira API Token'),
+                                        controller: jiraTokCtl,
+                                        obscureText: true,
+                                        onChanged: (_) => markRebuild(setDlg),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: TextButton.icon(
+                                          icon: const Icon(Icons.open_in_new),
+                                          label: const Text('Jira-Seite zum Erstellen/Verwalten des API-Tokens öffnen'),
+                                          onPressed: () async {
+                                            const url = 'https://id.atlassian.com/manage-profile/security/api-tokens';
+                                            final uri = Uri.parse(url);
+                                            if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+                                              if (context.mounted) {
+                                                ScaffoldMessenger.of(context).showSnackBar(
+                                                  const SnackBar(content: Text('Link konnte nicht geöffnet werden')),
+                                                );
+                                              }
+                                            }
+                                          },
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
 
-                // GitLab
-                Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text('GitLab (für Arbeitszeit Ticket-Automatik)',
-                        style: Theme.of(context).textTheme.titleSmall)),
-                TextFormField(
-                    decoration: const InputDecoration(labelText: 'GitLab Base URL (https://gitlab.example.com)'),
-                    controller: glBaseCtl),
-                TextFormField(
-                    decoration: const InputDecoration(labelText: 'GitLab PRIVATE-TOKEN'),
-                    controller: glTokCtl,
-                    obscureText: true),
-                TextFormField(
-                    decoration: const InputDecoration(labelText: 'GitLab Projekt-IDs (Komma/Leerzeichen getrennt)'),
-                    controller: glProjCtl),
-                TextFormField(
-                    decoration: const InputDecoration(labelText: 'GitLab Author E-Mail (optional, Filter)'),
-                    controller: glMailCtl),
-              ]),
-            ),
+                                // ------- TIMETAC -------
+                                SingleChildScrollView(
+                                  child: Column(
+                                    children: [
+                                      sectionTitle(ctx, 'CSV (Timetac) – Importkonfiguration'),
+                                      Row(children: [
+                                        Expanded(
+                                          child: TextFormField(
+                                            decoration: const InputDecoration(labelText: 'Delimiter (Standard: ;)'),
+                                            controller: delimCtl,
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Row(children: [
+                                            Checkbox(
+                                              value: hasHeader,
+                                              onChanged: (v) {
+                                                hasHeader = v ?? false;
+                                                markRebuild(setDlg);
+                                              },
+                                            ),
+                                            const Expanded(child: Text('Erste Zeile enthält Spaltennamen')),
+                                          ]),
+                                        ),
+                                      ]),
+                                      TextFormField(
+                                        decoration: const InputDecoration(
+                                            labelText: 'Spalte: Beschreibung/Aktion (Standard: Kommentar)'),
+                                        controller: descCtl,
+                                        onChanged: (_) => markRebuild(setDlg),
+                                      ),
+                                      Row(children: [
+                                        Expanded(
+                                          child: TextFormField(
+                                            decoration:
+                                                const InputDecoration(labelText: 'Spalte: Datum (Standard: Datum)'),
+                                            controller: dateCtl,
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: TextFormField(
+                                            decoration:
+                                                const InputDecoration(labelText: 'Spalte: Beginn (Standard: K)'),
+                                            controller: startCtl,
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                      ]),
+                                      Row(children: [
+                                        Expanded(
+                                          child: TextFormField(
+                                            decoration: const InputDecoration(labelText: 'Spalte: Ende (Standard: G)'),
+                                            controller: endCtl,
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: TextFormField(
+                                            decoration:
+                                                const InputDecoration(labelText: 'Spalte: Dauer (Standard: GIBA)'),
+                                            controller: durCtl,
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                      ]),
+                                      Row(children: [
+                                        Expanded(
+                                          child: TextFormField(
+                                            decoration:
+                                                const InputDecoration(labelText: 'Spalte: Gesamtpause (Standard: P)'),
+                                            controller: pauseTotalCtl,
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: TextFormField(
+                                            decoration: const InputDecoration(
+                                                labelText: 'Spalte: Pausen-Ranges (Standard: Pausen)'),
+                                            controller: pauseRangesCtl,
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                      ]),
+                                      Row(children: [
+                                        Expanded(
+                                          child: TextFormField(
+                                            decoration: const InputDecoration(
+                                                labelText: 'Spalte: Krankheitstage (Standard: KT)'),
+                                            controller: ktCtl,
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: TextFormField(
+                                            decoration:
+                                                const InputDecoration(labelText: 'Spalte: Feiertage (Standard: FT)'),
+                                            controller: ftCtl,
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                      ]),
+                                      Row(children: [
+                                        Expanded(
+                                          child: TextFormField(
+                                            decoration: const InputDecoration(
+                                                labelText: 'Spalte: Urlaubsstunden (Standard: UT)'),
+                                            controller: utCtl,
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: TextFormField(
+                                            decoration: const InputDecoration(
+                                                labelText: 'Spalte: Gesamte Nichtarbeitszeit (Standard: BNA)'),
+                                            controller: bnaCtl,
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                      ]),
+                                      TextFormField(
+                                        decoration:
+                                            const InputDecoration(labelText: 'Spalte: Zeitausgleich (Standard: ZA)'),
+                                        controller: zaCtl,
+                                        onChanged: (_) => markRebuild(setDlg),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
+                                // ------- GITLAB -------
+                                SingleChildScrollView(
+                                  child: Column(
+                                    children: [
+                                      sectionTitle(ctx, 'GitLab (für Arbeitszeit Ticket-Automatik)'),
+                                      TextFormField(
+                                        decoration: const InputDecoration(
+                                            labelText: 'GitLab Base URL (https://gitlab.example.com)'),
+                                        controller: glBaseCtl,
+                                        onChanged: (_) => markRebuild(setDlg),
+                                      ),
+                                      TextFormField(
+                                        decoration: const InputDecoration(labelText: 'GitLab Author E-Mail'),
+                                        controller: glMailCtl,
+                                        onChanged: (_) => markRebuild(setDlg),
+                                      ),
+                                      TextFormField(
+                                        decoration: const InputDecoration(
+                                            labelText: 'GitLab Projekt-IDs (Komma/Leerzeichen getrennt)'),
+                                        controller: glProjCtl,
+                                        onChanged: (_) => markRebuild(setDlg),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: TextButton.icon(
+                                          icon: const Icon(Icons.open_in_new),
+                                          label: const Text('Gitlab-Übersicht der Projekte öffnen'),
+                                          onPressed: () async {
+                                            if (glBaseCtl.text.isNotEmpty) {
+                                              var url = glBaseCtl.text.trim();
+                                              if (url.endsWith('/')) url = url.substring(0, url.length - 1);
+                                              url = '$url/dashboard/projects';
+                                              final uri = Uri.parse(url);
+                                              if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+                                                if (context.mounted) {
+                                                  ScaffoldMessenger.of(context).showSnackBar(
+                                                    const SnackBar(content: Text('Link konnte nicht geöffnet werden')),
+                                                  );
+                                                }
+                                              }
+                                            } else {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                const SnackBar(
+                                                  content: Text(
+                                                    'Link konnte nicht geöffnet werden, URL-Feld muss ausgefüllt sein',
+                                                  ),
+                                                ),
+                                              );
+                                            }
+                                          },
+                                        ),
+                                      ),
+                                      TextFormField(
+                                        decoration: const InputDecoration(labelText: 'GitLab PRIVATE-TOKEN'),
+                                        controller: glTokCtl,
+                                        obscureText: true,
+                                        onChanged: (_) => markRebuild(setDlg),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: TextButton.icon(
+                                          icon: const Icon(Icons.open_in_new),
+                                          label: const Text(
+                                            'Gitlab-Seite zum Erstellen/Verwalten des API-Tokens öffnen (NUR READ-API SETZEN)',
+                                          ),
+                                          onPressed: () async {
+                                            if (glBaseCtl.text.isNotEmpty) {
+                                              var url = glBaseCtl.text.trim();
+                                              if (url.endsWith('/')) url = url.substring(0, url.length - 1);
+                                              url = '$url/-/user_settings/personal_access_tokens';
+                                              final uri = Uri.parse(url);
+                                              if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+                                                if (context.mounted) {
+                                                  ScaffoldMessenger.of(context).showSnackBar(
+                                                    const SnackBar(content: Text('Link konnte nicht geöffnet werden')),
+                                                  );
+                                                }
+                                              }
+                                            } else {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                const SnackBar(
+                                                  content: Text(
+                                                    'Link konnte nicht geöffnet werden, URL-Feld muss ausgefüllt sein',
+                                                  ),
+                                                ),
+                                              );
+                                            }
+                                          },
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+
+                        const SizedBox(height: 8),
+
+                        // Aktionen
+                        Row(
+                          children: [
+                            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Schließen')),
+                            const Spacer(),
+                            FilledButton(
+                              onPressed: () async {
+                                final st = context.read<AppState>().settings;
+
+                                // Jira
+                                st.jiraBaseUrl = baseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
+                                st.jiraEmail = mailCtl.text.trim();
+                                st.jiraApiToken = jiraTokCtl.text.trim();
+
+                                // CSV
+                                st.csvDelimiter = delimCtl.text.trim().isEmpty ? ';' : delimCtl.text.trim();
+                                st.csvHasHeader = hasHeader;
+                                st.csvColDescription = descCtl.text.trim();
+                                st.csvColDate = dateCtl.text.trim();
+                                st.csvColStart = startCtl.text.trim();
+                                st.csvColEnd = endCtl.text.trim();
+                                st.csvColDuration = durCtl.text.trim();
+                                st.csvColPauseTotal = pauseTotalCtl.text.trim();
+                                st.csvColPauseRanges = pauseRangesCtl.text.trim();
+                                st.csvColAbsenceTotal = bnaCtl.text.trim();
+                                st.csvColSick = ktCtl.text.trim();
+                                st.csvColHoliday = ftCtl.text.trim();
+                                st.csvColVacation = utCtl.text.trim();
+                                st.csvColTimeCompensation = zaCtl.text.trim();
+
+                                // GitLab
+                                st.gitlabBaseUrl = glBaseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
+                                st.gitlabToken = glTokCtl.text.trim();
+                                st.gitlabProjectIds = glProjCtl.text.trim();
+                                st.gitlabAuthorEmail = glMailCtl.text.trim();
+
+                                await context.read<AppState>().savePrefs();
+                                if (context.mounted) Navigator.pop(ctx);
+                              },
+                              child: const Text('Speichern'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
           ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Schließen')),
-            FilledButton(
-              onPressed: () async {
-                final st = context.read<AppState>().settings;
-
-                // Jira
-                st.jiraBaseUrl = baseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
-                st.jiraEmail = mailCtl.text.trim();
-                st.jiraApiToken = jiraTokCtl.text.trim();
-
-                // CSV
-                st.csvDelimiter = delimCtl.text.trim().isEmpty ? ';' : delimCtl.text.trim();
-                st.csvHasHeader = hasHeader;
-                st.csvColDescription = descCtl.text.trim();
-                st.csvColDate = dateCtl.text.trim();
-                st.csvColStart = startCtl.text.trim();
-                st.csvColEnd = endCtl.text.trim();
-                st.csvColDuration = durCtl.text.trim();
-                st.csvColPauseTotal = pauseTotalCtl.text.trim();
-                st.csvColPauseRanges = pauseRangesCtl.text.trim();
-                s.csvColAbsenceTotal = bnaCtl.text.trim();
-                s.csvColSick = ktCtl.text.trim();
-                s.csvColHoliday = ftCtl.text.trim();
-                s.csvColVacation = utCtl.text.trim();
-                s.csvColTimeCompensation = zaCtl.text.trim();
-
-                // GitLab
-                st.gitlabBaseUrl = glBaseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
-                st.gitlabToken = glTokCtl.text.trim();
-                st.gitlabProjectIds = glProjCtl.text.trim();
-                st.gitlabAuthorEmail = glMailCtl.text.trim();
-
-                await context.read<AppState>().savePrefs();
-                if (context.mounted) Navigator.pop(ctx);
-              },
-              child: const Text('Speichern'),
-            ),
-          ],
         ),
       ),
     );
@@ -1349,4 +1602,14 @@ class _HomePageState extends State<HomePage> {
       });
     }
   }
+
+  Icon _settingsIcon(bool ok) =>
+      Icon(ok ? Icons.check_circle : Icons.cancel, color: ok ? Colors.green : Colors.red, size: 16);
+
+  Widget _sectionTitle(BuildContext ctx, String text) => Align(
+      alignment: Alignment.centerLeft,
+      child: Padding(
+        padding: const EdgeInsets.only(top: 8.0, bottom: 6.0),
+        child: Text(text, style: Theme.of(ctx).textTheme.titleSmall),
+      ));
 }
