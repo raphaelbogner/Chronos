@@ -237,6 +237,7 @@ class _HomePageState extends State<HomePage> {
   String _log = '';
   List<DraftLog> _drafts = [];
   Map<String, String> _jiraSummaryCache = {};
+  int _tabIndex = 0;
 
   String? _leadingTicket(String msg) {
     if (msg.isEmpty) return null;
@@ -438,6 +439,42 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ---------- UI ----------
+
+  Widget _switchedSection(BuildContext context) {
+    final state = context.watch<AppState>();
+
+    if (_tabIndex == 0) {
+      // Preview
+      if (state.totals.isEmpty) {
+        return const Padding(
+          padding: EdgeInsets.all(12.0),
+          child: Text('Keine Daten für die Vorschau.'),
+        );
+      }
+      return PreviewTable(days: state.totals);
+    }
+
+    if (_tabIndex == 1) {
+      // Geplante Worklogs
+      if (_drafts.isEmpty) {
+        return const Padding(
+          padding: EdgeInsets.all(12.0),
+          child: Text('Noch keine geplanten Worklogs.'),
+        );
+      }
+      return _plannedList(context, _drafts);
+    }
+
+    // Logs
+    if (_log.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(12.0),
+        child: Text('Noch keine Logs.'),
+      );
+    }
+    return _buildLogBox();
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
@@ -453,19 +490,31 @@ class _HomePageState extends State<HomePage> {
           IconButton(icon: const Icon(Icons.settings), onPressed: () => _openSettings(context)),
         ],
       ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _tabIndex,
+        onTap: (i) => setState(() => _tabIndex = i),
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.table_chart),
+            label: 'Vorschau',
+          ),
+          BottomNavigationBarItem(icon: Icon(Icons.view_list), label: 'Geplant'),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.receipt_long),
+            label: 'Logs',
+          ),
+        ],
+      ),
       body: Stack(
         children: [
           AbsorbPointer(
             absorbing: locked || _busy,
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(12),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, spacing: 12, children: [
                 _buildInputs(context),
-                const SizedBox(height: 12),
                 _buildImportButtons(context),
-                const SizedBox(height: 12),
                 _buildRangePicker(context),
-                const SizedBox(height: 12),
                 Row(children: [
                   FilledButton.icon(
                     onPressed: locked ? null : () => _calculate(context),
@@ -479,15 +528,7 @@ class _HomePageState extends State<HomePage> {
                     label: const Text('Buchen (Jira)'),
                   ),
                 ]),
-                const SizedBox(height: 12),
-                if (state.totals.isNotEmpty) ...[
-                  Text('Vorschau Summen', style: Theme.of(context).textTheme.titleLarge),
-                  PreviewTable(days: state.totals),
-                ],
-                const SizedBox(height: 12),
-                if (_drafts.isNotEmpty) _plannedList(context, _drafts),
-                const SizedBox(height: 12),
-                if (_log.isNotEmpty) _buildLogBox(),
+                _switchedSection(context),
               ]),
             ),
           ),
@@ -1235,6 +1276,7 @@ class _HomePageState extends State<HomePage> {
     } finally {
       setState(() {
         _busy = false;
+        _tabIndex = 1;
       });
     }
   }
