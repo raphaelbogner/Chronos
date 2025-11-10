@@ -1,4 +1,5 @@
 // lib/main.dart
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
@@ -245,6 +246,9 @@ class _HomePageState extends State<HomePage> {
   Map<String, String> _jiraSummaryCache = {};
   int _tabIndex = 0;
 
+  final Map<String, String> _issueOverrides = {}; // draftKey -> newKey
+  String _draftKey(DraftLog d) => '${d.start.millisecondsSinceEpoch}-${d.end.millisecondsSinceEpoch}-${d.issueKey}';
+
   String? _leadingTicket(String msg) {
     if (msg.isEmpty) return null;
     if (msg.toLowerCase().startsWith('merge')) return null;
@@ -393,57 +397,6 @@ class _HomePageState extends State<HomePage> {
     return drafts;
   }
 
-  // ---------------- Jira Summaries holen (Batch) ----------------
-  Future<Map<String, String>> _fetchJiraSummaries(Set<String> keys) async {
-    final s = context.read<AppState>().settings;
-    if (s.jiraBaseUrl.isEmpty || s.jiraEmail.isEmpty || s.jiraApiToken.isEmpty) return {};
-
-    final base = s.jiraBaseUrl.replaceAll(RegExp(r'/+$'), '');
-    final auth = base64Encode(utf8.encode('${s.jiraEmail}:${s.jiraApiToken}'));
-    final result = <String, String>{};
-
-    // In Batches (Jira: sinnvolle Grenze ~50)
-    const batchSize = 50;
-    final list = keys.toList();
-    for (var i = 0; i < list.length; i += batchSize) {
-      final slice = list.sublist(i, (i + batchSize > list.length) ? list.length : i + batchSize);
-      // neue JQL-Route (CHANGE-2046)
-      final jql = 'key in (${slice.map((k) => k.trim()).join(',')})';
-      final uri = Uri.parse(
-          '$base/rest/api/3/search/jql?jql=${Uri.encodeQueryComponent(jql)}&fields=summary&maxResults=${slice.length}');
-
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
-      try {
-        final req = await client.getUrl(uri);
-        req.headers.set(HttpHeaders.authorizationHeader, 'Basic $auth');
-        req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-        final resp = await req.close().timeout(const Duration(seconds: 20));
-        final body = await utf8.decodeStream(resp);
-        if (resp.statusCode >= 200 && resp.statusCode < 300) {
-          final json = jsonDecode(body) as Map<String, dynamic>;
-          final issues = (json['issues'] as List?) ?? const [];
-          for (final it in issues) {
-            final m = it as Map<String, dynamic>;
-            final key = (m['key'] ?? '').toString();
-            final fields = (m['fields'] as Map?) ?? const {};
-            final summary = (fields['summary'] ?? '').toString();
-            if (key.isNotEmpty && summary.isNotEmpty) {
-              result[key] = summary;
-            }
-          }
-        } else {
-          _log += 'WARN Jira search ${resp.statusCode}: $body\n';
-        }
-      } catch (e) {
-        _log += 'WARN Jira search exception: $e\n';
-      } finally {
-        client.close(force: true);
-      }
-    }
-
-    return result;
-  }
-
   // ---------- UI ----------
 
   Widget _switchedSection(BuildContext context) {
@@ -485,7 +438,6 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final locked = !state.isAllConfigured;
-    final canCalculate = !locked && state.hasCsv && state.hasIcs;
 
     return Scaffold(
       appBar: AppBar(
@@ -518,28 +470,17 @@ class _HomePageState extends State<HomePage> {
             absorbing: locked || _busy,
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(12),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, spacing: 12, children: [
-                _buildInputs(context),
-                _buildImportButtons(context),
-                _buildRangePicker(context),
-                Row(children: [
-                  FilledButton.icon(
-                    onPressed: canCalculate ? () => _calculate(context) : null,
-                    icon: const Icon(Icons.calculate),
-                    label: const Text('Berechnen'),
-                  ),
-                  const SizedBox(width: 12),
-                  FilledButton.icon(
-                    onPressed: locked || _drafts.isEmpty ? null : () => _bookToJira(context),
-                    icon: const Icon(Icons.send),
-                    label: const Text('Buchen (Jira)'),
-                  ),
-                ]),
-                if (!state.hasCsv || !state.hasIcs)
-                  const Text('CSV und ICS laden, um „Berechnen“ zu aktivieren.',
-                      style: TextStyle(fontSize: 12, color: Colors.grey)),
-                _switchedSection(context),
-              ]),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                spacing: 12,
+                children: [
+                  _buildInputs(context),
+                  _buildImportButtons(context),
+                  _buildRangePicker(context),
+                  _buildCalculateButtons(context),
+                  _switchedSection(context),
+                ],
+              ),
             ),
           ),
           if (locked) _lockOverlay(context, state),
@@ -635,6 +576,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _plannedList(BuildContext context, List<DraftLog> drafts) {
+    final settings = context.read<AppState>().settings;
+    final jira = JiraApi(baseUrl: settings.jiraBaseUrl, email: settings.jiraEmail, apiToken: settings.jiraApiToken);
     final byDay = <String, List<DraftLog>>{};
     for (final d in drafts) {
       final key = DateFormat('yyyy-MM-dd').format(d.start);
@@ -657,10 +600,42 @@ class _HomePageState extends State<HomePage> {
               Padding(
                 padding: const EdgeInsets.only(left: 8, bottom: 2),
                 child: Builder(builder: (_) {
-                  final maybeTitle = (w.issueKey != meetingKey) ? (_jiraSummaryCache[w.issueKey] ?? '') : '';
-                  final line = '${w.issueKey}  ${_hhmm(w.start)}–${_hhmm(w.end)}  (${formatDuration(w.duration)})  '
+                  final draftId = _draftKey(w);
+                  final effectiveKey = _issueOverrides[draftId] ?? w.issueKey;
+                  final maybeTitle = (effectiveKey != meetingKey) ? (_jiraSummaryCache[effectiveKey] ?? '') : '';
+                  final line = '$effectiveKey  ${_hhmm(w.start)}–${_hhmm(w.end)}  (${formatDuration(w.duration)})  '
                       '${w.note}${maybeTitle.isNotEmpty ? ' – $maybeTitle' : ''}';
-                  return Text(line, style: const TextStyle(fontFamily: 'monospace'));
+
+                  return Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Expanded(child: Text(line, style: const TextStyle(fontFamily: 'monospace'))),
+                      IconButton(
+                        tooltip: 'Ticket ändern',
+                        icon: const Icon(Icons.swap_horiz),
+                        onPressed: () async {
+                          final picked = await _openIssuePickerDialog(
+                            originalKey: w.issueKey,
+                            currentKey: effectiveKey,
+                            title: 'Ticket für ${DateFormat('dd.MM.yyyy HH:mm').format(w.start)} ändern',
+                          );
+                          if (picked != null && picked.isNotEmpty) {
+                            setState(() {
+                              _issueOverrides[draftId] = picked;
+                              // optional: Summary sofort nachladen
+                              if (!_jiraSummaryCache.containsKey(picked)) {
+                                jira.fetchSummariesByKeys({picked}).then((m) {
+                                  if (m.isNotEmpty && mounted) {
+                                    setState(() => _jiraSummaryCache.addAll(m));
+                                  }
+                                });
+                              }
+                            });
+                          }
+                        },
+                      ),
+                    ],
+                  );
                 }),
               ),
             const Divider(),
@@ -691,6 +666,20 @@ class _HomePageState extends State<HomePage> {
                   validator: (v) => (v == null || v.trim().isEmpty) ? 'Pflichtfeld' : null,
                 ),
               ),
+              const SizedBox(width: 8),
+              IconButton(
+                tooltip: 'Ticket wählen',
+                icon: const Icon(Icons.search),
+                onPressed: () async {
+                  final picked = await _openIssuePickerDialog(
+                    originalKey: meetingController.text.trim().isEmpty ? 'ABC-123' : meetingController.text.trim(),
+                    currentKey: meetingController.text.trim(),
+                    title: 'Meeting-Ticket wählen',
+                    showOriginalHint: false,
+                  );
+                  if (picked != null) meetingController.text = picked;
+                },
+              ),
               const SizedBox(width: 12),
               Expanded(
                 child: TextFormField(
@@ -699,6 +688,20 @@ class _HomePageState extends State<HomePage> {
                   onChanged: (v) => s.fallbackIssueKey = v.trim(),
                   validator: (v) => (v == null || v.trim().isEmpty) ? 'Pflichtfeld' : null,
                 ),
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                tooltip: 'Ticket wählen',
+                icon: const Icon(Icons.search),
+                onPressed: () async {
+                  final picked = await _openIssuePickerDialog(
+                    originalKey: meetingController.text.trim().isEmpty ? 'ABC-999' : meetingController.text.trim(),
+                    currentKey: meetingController.text.trim(),
+                    title: 'Fallback-Ticket wählen',
+                    showOriginalHint: false,
+                  );
+                  if (picked != null) meetingController.text = picked;
+                },
               ),
             ]),
             const SizedBox(height: 8),
@@ -903,6 +906,42 @@ class _HomePageState extends State<HomePage> {
             ),
           ]),
         ]),
+      ),
+    );
+  }
+
+  Widget _buildCalculateButtons(BuildContext context) {
+    final state = context.watch<AppState>();
+    final locked = !state.isAllConfigured;
+    final canCalculate = !locked && state.hasCsv && state.hasIcs;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          spacing: 12,
+          children: [
+            Row(children: [
+              FilledButton.icon(
+                onPressed: canCalculate ? () => _calculate(context) : null,
+                icon: const Icon(Icons.calculate),
+                label: const Text('Berechnen'),
+              ),
+              const SizedBox(width: 12),
+              FilledButton.icon(
+                onPressed: locked || _drafts.isEmpty ? null : () => _bookToJira(context),
+                icon: const Icon(Icons.send),
+                label: const Text('Buchen (Jira)'),
+              ),
+            ]),
+            if (!state.hasCsv || !state.hasIcs)
+              const Text(
+                'CSV und ICS laden, um „Berechnen“ zu aktivieren.',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1562,6 +1601,12 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _calculate(BuildContext context) async {
     final state = context.read<AppState>();
+    final jira = JiraApi(
+      baseUrl: state.settings.jiraBaseUrl,
+      email: state.settings.jiraEmail,
+      apiToken: state.settings.jiraApiToken,
+    );
+
     setState(() {
       _busy = true;
       _log += 'Berechne…\n';
@@ -1571,6 +1616,7 @@ class _HomePageState extends State<HomePage> {
     try {
       clearIcsDayCache(); // defensiv
 
+      // CSV-Tage ermitteln
       final csvDaysSet = state.timetac.map((t) => DateTime(t.date.year, t.date.month, t.date.day)).toSet();
       if (csvDaysSet.isEmpty) {
         _log += 'Hinweis: Keine CSV-Daten geladen.\n';
@@ -1599,7 +1645,7 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      // ⚡ Meetings für den Zeitraum vorbereiten (Fast-Cache)
+      // Meetings für Zeitraum vorbereiten (Fast-Cache)
       prepareUserMeetingsRange(
         allEvents: state.icsEvents,
         userEmail: state.settings.jiraEmail,
@@ -1607,7 +1653,7 @@ class _HomePageState extends State<HomePage> {
         to: rangeEnd,
       );
 
-      // GitLab
+      // GitLab vorbereiten
       final s = state.settings;
       final lookbackStart = rangeStart.subtract(Duration(days: s.gitlabLookbackDays));
       final until = rangeEnd.add(const Duration(days: 1));
@@ -1663,18 +1709,22 @@ class _HomePageState extends State<HomePage> {
           _logCommitsForDay(day, ordered, (s) => _log += s);
         }
 
+        // Arbeitsfenster
         final workWindows = state.workWindowsForDay(day);
         final productiveDur = workWindows.fold<Duration>(Duration.zero, (p, w) => p + w.duration);
 
+        // CSV-Zeilen des Tages
         final rowsForDay = state.timetac
             .where((r) => r.date.year == day.year && r.date.month == day.month && r.date.day == day.day)
             .toList();
+
         final ignoreOutlook = productiveDur == Duration.zero ||
             rowsForDay.any((r) {
               final d = r.description.toLowerCase();
               return d.contains('urlaub') || d.contains('feiertag') || d.contains('krank') || d.contains('abwesen');
             });
 
+        // Meetings schneiden und als Drafts
         final meetingCutters = <WorkWindow>[];
         final meetingDrafts = <DraftLog>[];
         if (!ignoreOutlook) {
@@ -1697,11 +1747,12 @@ class _HomePageState extends State<HomePage> {
           }
         }
 
-        // Arzttermine nur berücksichtigen, wenn KT/FT/UT = 0
+        // Arzttermine als Pause behandeln, nur wenn keine KT/FT/UT/ZA vorliegen
         final ktDays = rowsForDay.fold<double>(0.0, (p, r) => p + r.sickDays);
         final ftDays = rowsForDay.fold<double>(0.0, (p, r) => p + r.holidayDays);
-        final utDays = rowsForDay.fold<Duration>(Duration.zero, (p, r) => p + r.vacationHours);
-        final doctor = (ktDays == 0.0 && ftDays == 0.0 && utDays == Duration.zero)
+        final utHours = rowsForDay.fold<Duration>(Duration.zero, (p, r) => p + r.vacationHours);
+        final zaHours = rowsForDay.fold<Duration>(Duration.zero, (p, r) => p + r.timeCompensationHours);
+        final doctor = (ktDays == 0.0 && ftDays == 0.0 && utHours == Duration.zero && zaHours == Duration.zero)
             ? rowsForDay.fold<Duration>(Duration.zero, (p, r) => p + r.absenceTotal)
             : Duration.zero;
 
@@ -1711,9 +1762,10 @@ class _HomePageState extends State<HomePage> {
           restPieces.addAll(subtractIntervals(w, meetingCutters));
         }
 
-        // Arzttermin vom Rest abziehen
+        // Arztbesuch vom Rest abziehen (wie Pause), vom Tagesende rückwärts
         final trimmedRest = _trimPiecesFromEndBy(doctor, restPieces);
 
+        // Rest auf Tickets verteilen
         final restDrafts = ordered.isEmpty
             ? <DraftLog>[]
             : _assignRestPiecesByCommits(
@@ -1723,13 +1775,25 @@ class _HomePageState extends State<HomePage> {
                 log: (s) => _log += s,
               );
 
+        // Drafts des Tages zusammenführen
         final dayDrafts = <DraftLog>[
           ...meetingDrafts,
           ...restDrafts,
         ]..sort((a, b) => a.start.compareTo(b.start));
 
-        allDrafts.addAll(dayDrafts);
+        // Ticket-Overrides anwenden, falls gesetzt
+        final withOverrides = dayDrafts.map((d) {
+          final id = _draftKey(d);
+          final overridden = _issueOverrides[id];
+          if (overridden != null && overridden.trim().isNotEmpty && overridden != d.issueKey) {
+            return DraftLog(start: d.start, end: d.end, issueKey: overridden, note: d.note);
+          }
+          return d;
+        }).toList();
 
+        allDrafts.addAll(withOverrides);
+
+        // Logging Tageszusammenfassung
         final meetingDur = meetingDrafts.fold<Duration>(Duration.zero, (p, d) => p + d.duration);
         final dayTicketCount =
             ordered.where((c) => c.at.year == day.year && c.at.month == day.month && c.at.day == day.day).length;
@@ -1741,56 +1805,156 @@ class _HomePageState extends State<HomePage> {
             '${ordered.isNotEmpty ? 'GitLab aktiv ($dayTicketCount/${ordered.length})' : 'GitLab aus'}\n';
       }
 
-      // -------- Jira Summaries anhängen (nur Arbeits-Logs) --------
+      // -------- Summaries laden (nur für Anzeige) --------
+      final overrideKeys = _issueOverrides.values.where((e) => e.trim().isNotEmpty).toSet();
       final nonMeetingKeys =
           allDrafts.where((d) => d.issueKey != state.settings.meetingIssueKey).map((d) => d.issueKey).toSet();
 
+      final needSummaries = {...nonMeetingKeys, ...overrideKeys};
       Map<String, String> summaries = {};
-      if (nonMeetingKeys.isNotEmpty) {
-        summaries = await _fetchJiraSummaries(nonMeetingKeys);
-        _log += 'Jira Summaries geholt: ${summaries.length}/${nonMeetingKeys.length}\n';
+      if (needSummaries.isNotEmpty) {
+        summaries = await jira.fetchSummariesByKeys(needSummaries);
+        _log += 'Jira Summaries geholt: ${summaries.length}/${needSummaries.length}\n';
       }
-
       _jiraSummaryCache = summaries;
 
-      final enrichedDrafts = <DraftLog>[];
-      for (final d in allDrafts) {
-        if (d.issueKey != state.settings.meetingIssueKey) {
-          final title = summaries[d.issueKey];
-          if (title != null && title.trim().isNotEmpty) {
-            enrichedDrafts.add(DraftLog(
-              start: d.start,
-              end: d.end,
-              issueKey: d.issueKey,
-              note: '${d.note} – $title',
-            ));
-            continue;
-          }
-        }
-        enrichedDrafts.add(d);
-      }
-
+      // Drafts direkt übernehmen, note NICHT mit Titeln anreichern
       setState(() {
-        _drafts = enrichedDrafts;
+        _drafts = allDrafts;
       });
 
-      if (enrichedDrafts.isEmpty) {
+      if (allDrafts.isEmpty) {
         _log += 'Hinweis: Keine Worklogs erzeugt. Prüfe CSV/ICS, Zeitraum und Commit-Filter.\n';
       }
 
-      _log += 'Drafts: ${enrichedDrafts.length}\n';
+      _log += 'Drafts: ${allDrafts.length}\n';
     } catch (e, st) {
       _log += 'EXCEPTION in Berechnung: $e\n$st\n';
     } finally {
       setState(() {
         _busy = false;
-        _tabIndex = 1;
       });
     }
   }
 
+  Future<String?> _openIssuePickerDialog({
+    required String originalKey,
+    String? currentKey,
+    String title = 'Jira Ticket wählen',
+    bool showOriginalHint = true,
+  }) async {
+    final txtCtl = TextEditingController(text: currentKey ?? originalKey);
+    List<JiraIssueLight> results = [];
+    bool loading = false;
+    bool firedInitialSearch = false;
+    Timer? deb;
+
+    final s = context.read<AppState>().settings;
+    final jira = JiraApi(baseUrl: s.jiraBaseUrl, email: s.jiraEmail, apiToken: s.jiraApiToken);
+
+    Future<void> runSearch(String q, void Function(void Function()) setDlg) async {
+      if (q.trim().isEmpty) {
+        setDlg(() {});
+        return;
+      }
+      loading = true;
+      setDlg(() {});
+      results = await jira.searchIssues(q.trim());
+      loading = false;
+      setDlg(() {});
+    }
+
+    return showDialog<String>(
+      context: context,
+      useSafeArea: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) {
+          // Beim ersten Build direkt einmal suchen, wenn Feld nicht leer ist.
+          if (!firedInitialSearch) {
+            firedInitialSearch = true;
+            if (txtCtl.text.trim().isNotEmpty) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                runSearch(txtCtl.text.trim(), setDlg);
+              });
+            }
+          }
+
+          return AlertDialog(
+            title: Text(title),
+            content: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 700, maxHeight: 520),
+              child: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (showOriginalHint && originalKey.isNotEmpty) // <— nur wenn erlaubt
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.info_outline, size: 18),
+                            const SizedBox(width: 6),
+                            Flexible(child: Text('Original erkannt: $originalKey')),
+                          ],
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: txtCtl,
+                      decoration: const InputDecoration(
+                        labelText: 'Suche nach Key (ABC-123) oder Titel',
+                        prefixIcon: Icon(Icons.search),
+                      ),
+                      onChanged: (v) {
+                        deb?.cancel();
+                        deb = Timer(const Duration(milliseconds: 350), () => runSearch(v, setDlg));
+                      },
+                      onSubmitted: (v) => runSearch(v, setDlg),
+                    ),
+                    const SizedBox(height: 8),
+                    if (loading) const LinearProgressIndicator(),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: Material(
+                        child: results.isEmpty
+                            ? const Center(child: Text('Keine Treffer'))
+                            : ListView.separated(
+                                itemCount: results.length,
+                                separatorBuilder: (_, __) => const Divider(height: 1),
+                                itemBuilder: (_, i) {
+                                  final it = results[i];
+                                  return ListTile(
+                                    dense: true,
+                                    leading: const Icon(Icons.bug_report),
+                                    title: Text(it.key),
+                                    subtitle: Text(it.summary, maxLines: 2, overflow: TextOverflow.ellipsis),
+                                    onTap: () => Navigator.of(ctx).pop(it.key),
+                                  );
+                                },
+                              ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(ctx).pop(null), child: const Text('Abbrechen')),
+              if (showOriginalHint)
+                TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(originalKey),
+                    child: const Text('Original erkanntes Ticket nutzen')),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   Future<void> _bookToJira(BuildContext context) async {
     final state = context.read<AppState>();
+
     if (_drafts.isEmpty) {
       setState(() => _log += 'Keine Worklogs zu senden.\n');
       return;
@@ -1831,7 +1995,8 @@ class _HomePageState extends State<HomePage> {
 
       int ok = 0, fail = 0;
       for (final d in _drafts) {
-        final keyOrId = keyToId[d.issueKey] ?? d.issueKey;
+        final key = _issueOverrides[_draftKey(d)] ?? d.issueKey;
+        final keyOrId = keyToId[key] ?? key;
         final res = await worklogApi.createWorklog(
           issueKeyOrId: keyOrId,
           started: d.start,
