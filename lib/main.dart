@@ -29,13 +29,26 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
       create: (_) => AppState()..loadPrefs(),
-      child: MaterialApp(
-        title: 'Timetac + Outlook → Jira Worklogs',
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueGrey),
-          useMaterial3: true,
-        ),
-        home: const HomePage(),
+      child: Builder(
+        builder: (context) {
+          final app = context.watch<AppState>();
+          final light = ThemeData(
+            colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueGrey, brightness: Brightness.light),
+            useMaterial3: true,
+          );
+          final dark = ThemeData(
+            colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueGrey, brightness: Brightness.dark),
+            useMaterial3: true,
+          );
+          return MaterialApp(
+            title: 'Timetac + Outlook → Jira Worklogs',
+            theme: light,
+            darkTheme: dark,
+            themeMode: app.themeMode,
+            debugShowCheckedModeBanner: false,
+            home: const HomePage(),
+          );
+        },
       ),
     );
   }
@@ -54,6 +67,15 @@ class AppState extends ChangeNotifier {
 
   DateTimeRange? range;
 
+  // ---- Theme ----
+  ThemeMode themeMode = ThemeMode.light;
+  bool get isDark => themeMode == ThemeMode.dark;
+  void toggleTheme() {
+    themeMode = isDark ? ThemeMode.light : ThemeMode.dark;
+    _saveThemePref();
+    notifyListeners();
+  }
+
   Future<void> loadPrefs() async {
     final p = await SharedPreferences.getInstance();
     final jsonStr = p.getString('settings');
@@ -62,15 +84,23 @@ class AppState extends ChangeNotifier {
         settings = SettingsModel.fromJson(jsonDecode(jsonStr) as Map<String, dynamic>);
       } catch (_) {}
     }
-    setNonMeetingHints(settings.nonMeetingHintsList);
+    final tm = p.getString('themeMode');
+    if (tm == 'dark') themeMode = ThemeMode.dark;
+    if (tm == 'light') themeMode = ThemeMode.light;
     notifyListeners();
   }
 
   Future<void> savePrefs() async {
     final p = await SharedPreferences.getInstance();
     await p.setString('settings', jsonEncode(settings.toJson()));
-    setNonMeetingHints(settings.nonMeetingHintsList);
+    // Theme wird separat gespeichert, damit auch bei Settings-Änderungen konsistent
+    await _saveThemePref();
     notifyListeners();
+  }
+
+  Future<void> _saveThemePref() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('themeMode', themeMode == ThemeMode.dark ? 'dark' : 'light');
   }
 
   // ---------- Konfig-Validierung ----------
@@ -442,10 +472,30 @@ class _HomePageState extends State<HomePage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Timetac + Outlook → Jira Worklogs'),
+        actionsPadding: const EdgeInsets.only(right: 12.0),
         actions: [
           _statusPill(state.isJiraConfigured, 'Jira'),
           _statusPill(state.isTimetacConfigured, 'Timetac'),
           _statusPill(state.isGitlabConfigured, 'GitLab'),
+          const SizedBox(width: 24),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  icon: Icon(state.isDark ? Icons.light_mode : Icons.dark_mode),
+                  onPressed: () => context.read<AppState>().toggleTheme(),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  state.isDark ? 'Dunkles Theme aktiv' : 'Helles Theme aktiv',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 24),
           IconButton(icon: const Icon(Icons.settings), onPressed: () => _openSettings(context)),
         ],
       ),
