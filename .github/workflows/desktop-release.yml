@@ -4,7 +4,10 @@ on:
   push:
     tags: ['[0-9]+.[0-9]+.[0-9]+*']
   workflow_dispatch:  # manueller Start
-
+  
+permissions:
+  contents: write
+  
 jobs:
   build:
     strategy:
@@ -75,6 +78,8 @@ jobs:
           path: ${{ env.PKG }}
 
   release:
+    permissions:
+      contents: write
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -82,7 +87,16 @@ jobs:
         with:
           path: dist
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: dist/**/*   # lädt alle ZIP/TAR.GZ hoch
+          generate_release_notes: true
+          files: |
+            build/artifacts/**/*.zip
+            build/artifacts/**/*.tar.gz
+            build/artifacts/**/*.exe
+            build/artifacts/**/*.dmg
+            build/artifacts/**/*.AppImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
