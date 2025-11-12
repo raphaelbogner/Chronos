@@ -1371,7 +1371,8 @@ class _HomePageState extends State<HomePage> {
                                         alignment: Alignment.centerLeft,
                                         child: TextButton.icon(
                                           icon: const Icon(Icons.open_in_new),
-                                          label: const Text('Gitlab-Übersicht der Projekte öffnen'),
+                                          label: const Text(
+                                              'Gitlab-Übersicht der Projekte öffnen (Auf ein Projekt klicken und dann über die drei Punkte oben rechts die ID kopieren)'),
                                           onPressed: () async {
                                             if (glBaseCtl.text.isNotEmpty) {
                                               var url = glBaseCtl.text.trim();
