@@ -88,9 +88,12 @@ class AppState extends ChangeNotifier {
         settings = SettingsModel.fromJson(jsonDecode(jsonStr) as Map<String, dynamic>);
       } catch (_) {}
     }
+    _normalizeUrlsInSettings();
+
     final tm = p.getString('themeMode');
     if (tm == 'dark') themeMode = ThemeMode.dark;
     if (tm == 'light') themeMode = ThemeMode.light;
+
     notifyListeners();
 
     // Auto-Check beim Start
@@ -165,9 +168,9 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> savePrefs() async {
+    _normalizeUrlsInSettings();
     final p = await SharedPreferences.getInstance();
     await p.setString('settings', jsonEncode(settings.toJson()));
-    // Theme wird separat gespeichert, damit auch bei Settings-Änderungen konsistent
     await _saveThemePref();
     notifyListeners();
   }
@@ -175,6 +178,33 @@ class AppState extends ChangeNotifier {
   Future<void> _saveThemePref() async {
     final p = await SharedPreferences.getInstance();
     await p.setString('themeMode', themeMode == ThemeMode.dark ? 'dark' : 'light');
+  }
+
+  String _normalizeBaseUrl(String input) {
+    var s = input.trim();
+    if (s.isEmpty) return '';
+    if (!s.toLowerCase().startsWith('http://') && !s.toLowerCase().startsWith('https://')) {
+      s = 'https://$s';
+    }
+    Uri? u;
+    try {
+      u = Uri.parse(s);
+    } catch (_) {
+      return s.replaceAll(RegExp(r'/+$'), ''); // Fallback: nur Slashes kappen
+    }
+    if ((u.host).isEmpty) return s.replaceAll(RegExp(r'/+$'), '');
+
+    // Pfad ohne abschließenden Slash lassen, Query/Fragment verwerfen
+    var path = u.path.replaceAll(RegExp(r'/+$'), '');
+    final portPart = (u.hasPort && u.port != 443) ? ':${u.port}' : '';
+    final pathPart = path.isEmpty ? '' : (path.startsWith('/') ? path : '/$path');
+
+    return 'https://${u.host.toLowerCase()}$portPart$pathPart';
+  }
+
+  void _normalizeUrlsInSettings() {
+    settings.jiraBaseUrl = _normalizeBaseUrl(settings.jiraBaseUrl);
+    settings.gitlabBaseUrl = _normalizeBaseUrl(settings.gitlabBaseUrl);
   }
 
   // ---------- Konfig-Validierung ----------
