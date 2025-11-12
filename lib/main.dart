@@ -107,7 +107,8 @@ class AppState extends ChangeNotifier {
   bool get isJiraConfigured =>
       settings.jiraBaseUrl.trim().isNotEmpty &&
       settings.jiraEmail.trim().isNotEmpty &&
-      settings.jiraApiToken.trim().isNotEmpty;
+      settings.meetingIssueKey.trim().isNotEmpty &&
+      settings.fallbackIssueKey.trim().isNotEmpty;
 
   bool get isTimetacConfigured =>
       settings.csvDelimiter.trim().isNotEmpty &&
@@ -269,7 +270,6 @@ class _CT {
 }
 
 class _HomePageState extends State<HomePage> {
-  final _form = GlobalKey<FormState>();
   bool _busy = false;
   String _log = '';
   List<DraftLog> _drafts = [];
@@ -524,7 +524,6 @@ class _HomePageState extends State<HomePage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 spacing: 12,
                 children: [
-                  _buildInputs(context),
                   _buildImportButtons(context),
                   _buildRangePicker(context),
                   _buildCalculateButtons(context),
@@ -691,83 +690,6 @@ class _HomePageState extends State<HomePage> {
             const Divider(),
           ],
         ]),
-      ),
-    );
-  }
-
-  Widget _buildInputs(BuildContext context) {
-    final s = context.read<AppState>().settings;
-    final meetingController = TextEditingController(text: s.meetingIssueKey);
-    final fallbackController = TextEditingController(text: s.fallbackIssueKey);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Form(
-          key: _form,
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('Ticket-Zuordnung', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Row(children: [
-              Expanded(
-                child: TextFormField(
-                  controller: meetingController,
-                  decoration: const InputDecoration(labelText: 'Jira Ticket (Meetings, z. B. ABC-123)'),
-                  onChanged: (v) => s.meetingIssueKey = v.trim(),
-                  validator: (v) => (v == null || v.trim().isEmpty) ? 'Pflichtfeld' : null,
-                ),
-              ),
-              const SizedBox(width: 8),
-              IconButton(
-                tooltip: 'Ticket wählen',
-                icon: const Icon(Icons.search),
-                onPressed: () async {
-                  final picked = await _openIssuePickerDialog(
-                    originalKey: meetingController.text.trim().isEmpty ? 'ABC-123' : meetingController.text.trim(),
-                    currentKey: meetingController.text.trim(),
-                    title: 'Meeting-Ticket wählen',
-                    showOriginalHint: false,
-                  );
-                  if (picked != null) meetingController.text = picked;
-                },
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: TextFormField(
-                  controller: fallbackController,
-                  decoration: const InputDecoration(labelText: 'Jira Ticket (Fallback, z. B. ABC-999)'),
-                  onChanged: (v) => s.fallbackIssueKey = v.trim(),
-                  validator: (v) => (v == null || v.trim().isEmpty) ? 'Pflichtfeld' : null,
-                ),
-              ),
-              const SizedBox(width: 8),
-              IconButton(
-                tooltip: 'Ticket wählen',
-                icon: const Icon(Icons.search),
-                onPressed: () async {
-                  final picked = await _openIssuePickerDialog(
-                    originalKey: meetingController.text.trim().isEmpty ? 'ABC-999' : meetingController.text.trim(),
-                    currentKey: meetingController.text.trim(),
-                    title: 'Fallback-Ticket wählen',
-                    showOriginalHint: false,
-                  );
-                  if (picked != null) meetingController.text = picked;
-                },
-              ),
-            ]),
-            const SizedBox(height: 8),
-            FilledButton.tonal(
-              onPressed: () async {
-                if (_form.currentState!.validate()) {
-                  await context.read<AppState>().savePrefs();
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Gespeichert.')));
-                  }
-                }
-              },
-              child: const Text('Speichern'),
-            ),
-          ]),
-        ),
       ),
     );
   }
@@ -1045,6 +967,8 @@ class _HomePageState extends State<HomePage> {
     final baseCtl = TextEditingController(text: s.jiraBaseUrl);
     final mailCtl = TextEditingController(text: s.jiraEmail);
     final jiraTokCtl = TextEditingController(text: s.jiraApiToken);
+    final meetingCtl = TextEditingController(text: s.meetingIssueKey);
+    final fallbackCtl = TextEditingController(text: s.fallbackIssueKey);
 
     final delimCtl = TextEditingController(text: s.csvDelimiter);
     bool hasHeader = s.csvHasHeader;
@@ -1182,6 +1106,66 @@ class _HomePageState extends State<HomePage> {
                                   child: Column(
                                     spacing: 8,
                                     children: [
+                                      sectionTitle(ctx, 'Ticket-Zuordnung'),
+                                      Row(children: [
+                                        Expanded(
+                                          child: TextFormField(
+                                            controller: meetingCtl,
+                                            decoration: const InputDecoration(
+                                              labelText: 'Jira Ticket (Meetings, z. B. ABC-123)',
+                                            ),
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        IconButton(
+                                          tooltip: 'Ticket wählen',
+                                          icon: const Icon(Icons.search),
+                                          onPressed: () async {
+                                            final picked = await _openIssuePickerDialog(
+                                              originalKey:
+                                                  meetingCtl.text.trim().isEmpty ? 'ABC-123' : meetingCtl.text.trim(),
+                                              currentKey: meetingCtl.text.trim(),
+                                              title: 'Meeting-Ticket wählen',
+                                              showOriginalHint: false,
+                                            );
+                                            if (picked != null) {
+                                              meetingCtl.text = picked;
+                                              markRebuild(setDlg);
+                                            }
+                                          },
+                                        ),
+                                      ]),
+                                      const SizedBox(height: 8),
+                                      Row(children: [
+                                        Expanded(
+                                          child: TextFormField(
+                                            controller: fallbackCtl,
+                                            decoration: const InputDecoration(
+                                              labelText: 'Jira Ticket (Fallback, z. B. ABC-999)',
+                                            ),
+                                            onChanged: (_) => markRebuild(setDlg),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        IconButton(
+                                          tooltip: 'Ticket wählen',
+                                          icon: const Icon(Icons.search),
+                                          onPressed: () async {
+                                            final picked = await _openIssuePickerDialog(
+                                              originalKey:
+                                                  fallbackCtl.text.trim().isEmpty ? 'ABC-999' : fallbackCtl.text.trim(),
+                                              currentKey: fallbackCtl.text.trim(),
+                                              title: 'Fallback-Ticket wählen',
+                                              showOriginalHint: false,
+                                            );
+                                            if (picked != null) {
+                                              fallbackCtl.text = picked;
+                                              markRebuild(setDlg);
+                                            }
+                                          },
+                                        ),
+                                      ]),
                                       sectionTitle(ctx, 'Jira Arbeit'),
                                       TextFormField(
                                         decoration: const InputDecoration(
@@ -1590,6 +1574,8 @@ class _HomePageState extends State<HomePage> {
                                 st.jiraBaseUrl = baseCtl.text.trim().replaceAll(RegExp(r'/+$'), '');
                                 st.jiraEmail = mailCtl.text.trim();
                                 st.jiraApiToken = jiraTokCtl.text.trim();
+                                st.meetingIssueKey = meetingCtl.text.trim();
+                                st.fallbackIssueKey = fallbackCtl.text.trim();
 
                                 // CSV
                                 st.csvDelimiter = delimCtl.text.trim().isEmpty ? ';' : delimCtl.text.trim();
