@@ -133,9 +133,16 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<bool> validateJiraCredentials() async {
-    if (!_jiraFieldsFilled) {
+
+  Future<bool> validateJiraCredentials({bool requireTickets = true}) async {
+    final credsOk = _jiraCredentialFieldsFilled;
+    final ticketsOk = _jiraTicketFieldsFilled;
+
+    // Wenn Zugangsdaten fehlen → gar nicht erst gegen Jira schießen
+    // Wenn requireTickets=true, müssen zusätzlich die Tickets gefüllt sein.
+    if (!credsOk || (requireTickets && !ticketsOk)) {
       _jiraAuthOk = false;
+      jiraAccountId = null;
       notifyListeners();
       return false;
     }
@@ -239,12 +246,16 @@ class AppState extends ChangeNotifier {
   }
 
   // ---------- Konfig-Validierung ----------
-  bool get _jiraFieldsFilled =>
+  bool get _jiraCredentialFieldsFilled =>
       settings.jiraBaseUrl.trim().isNotEmpty &&
       settings.jiraEmail.trim().isNotEmpty &&
-      settings.jiraApiToken.trim().isNotEmpty &&
+      settings.jiraApiToken.trim().isNotEmpty;
+
+  bool get _jiraTicketFieldsFilled =>
       settings.meetingIssueKey.trim().isNotEmpty &&
       settings.fallbackIssueKey.trim().isNotEmpty;
+
+  bool get _jiraFieldsFilled => _jiraCredentialFieldsFilled && _jiraTicketFieldsFilled;
 
   bool get isJiraConfigured => _jiraFieldsFilled && _jiraAuthOk;
 
@@ -2045,15 +2056,42 @@ class _HomePageState extends State<HomePage> {
 
                                               // Status zurücksetzen und testen
                                               if (context.mounted) {
-                                                context.read<AppState>().markJiraUnknown();
+                                                final app = context.read<AppState>();
+
+                                                // Reset auth status
+                                                app.markJiraUnknown();
                                                 setDlg(() => jiraTesting = true);
-                                                final ok = await context.read<AppState>().validateJiraCredentials();
+                                                final ok = await app.validateJiraCredentials(requireTickets: false);
                                                 setDlg(() => jiraTesting = false);
 
-                                                _showInfoDialog(
-                                                  'Jira-Verbindung',
-                                                  ok ? 'Jira-Verbindung erfolgreich' : 'Jira-Verbindung fehlgeschlagen',
-                                                );
+                                                final credsOk = app._jiraCredentialFieldsFilled;
+                                                final ticketsOk = app._jiraTicketFieldsFilled;
+
+                                                String message;
+
+                                                if (!credsOk) {
+                                                  // Ohne URL + Mail + Token macht ein Test keinen Sinn
+                                                  message = 'Fehler: Jira-Zugangsdaten (URL, E-Mail, API-Token) '
+                                                            'fehlen oder sind unvollständig.';
+                                                } else if (!ticketsOk) {
+                                                  if (ok) {
+                                                    // Login ok, Tickets fehlen → Haken ist trotzdem grün
+                                                    message = 'Jira-Verbindung erfolgreich!\n\n'
+                                                              'Hinweis: Die Tickets für Meetings und Fallback sind '
+                                                              'noch nicht befüllt.';
+                                                  } else {
+                                                    message = 'Fehler: Jira-Verbindung fehlgeschlagen. '
+                                                              'Bitte Zugangsdaten prüfen.';
+                                                  }
+                                                } else {
+                                                  // Zugangsdaten + Tickets gefüllt
+                                                  message = ok
+                                                      ? 'Jira-Verbindung erfolgreich!'
+                                                      : 'Fehler: Jira-Verbindung fehlgeschlagen. '
+                                                        'Bitte Zugangsdaten prüfen.';
+                                                }
+
+                                                _showInfoDialog('Jira-Verbindung', message);
                                               }
                                             },
                                             icon: const Icon(Icons.link),
@@ -2547,11 +2585,11 @@ class _HomePageState extends State<HomePage> {
                                 // Validieren
                                 app.markJiraUnknown();
                                 app.markGitlabUnknown();
-                                final jiraTestOkay = await app.validateJiraCredentials();
-                                final gitlabTestOkay = await app.validateGitlabCredentials();
+                                final jiraOkay = await app.validateJiraCredentials();
+                                final gitlabOkay = await app.validateGitlabCredentials();
                                 if (!ctx.mounted || !context.mounted) return;
 
-                                if (jiraTestOkay && gitlabTestOkay) {
+                                if (jiraOkay && gitlabOkay) {
                                   Navigator.of(ctx).pop(); // Settings schließen
                                   ScaffoldMessenger.of(context)
                                       .showSnackBar(const SnackBar(content: Text('Gespeichert und verbunden')));
@@ -2559,12 +2597,59 @@ class _HomePageState extends State<HomePage> {
                                 }
 
                                 // Fehlerfall: Settings-Dialog offen lassen und Fehlgrund anzeigen
-                                final msg = (!jiraTestOkay && !gitlabTestOkay)
-                                    ? 'Gespeichert, aber Jira und GitLab Verbindung fehlgeschlagen.'
-                                    : (!jiraTestOkay)
-                                        ? 'Gespeichert, aber Jira-Verbindung fehlgeschlagen.'
-                                        : 'Gespeichert, aber GitLab-Verbindung fehlgeschlagen.';
-                                await _showErrorDialog('Verbindung fehlgeschlagen', msg);
+                                final problems = <String>[];
+
+                                // Jira-Fehler differenziert
+                                if (!jiraOkay) {
+                                  final jiraCredsOk = app._jiraCredentialFieldsFilled;
+                                  final jiraTicketsOk = app._jiraTicketFieldsFilled;
+
+                                  if (!jiraCredsOk && !jiraTicketsOk) {
+                                    problems.add(
+                                      'Jira: Zugangsdaten (Base-URL, E-Mail, API-Token) '
+                                      'UND Tickets (Meeting/Fallback) sind nicht vollständig.',
+                                    );
+                                  } else if (!jiraCredsOk) {
+                                    problems.add(
+                                      'Jira: Zugangsdaten (Base-URL, E-Mail, API-Token) fehlen '
+                                      'oder sind ungültig.',
+                                    );
+                                  } else if (!jiraTicketsOk) {
+                                    problems.add(
+                                      'Jira: Verbindung wäre möglich, aber die Tickets für '
+                                      'Meetings und Fallback sind nicht gesetzt.',
+                                    );
+                                  } else {
+                                    problems.add(
+                                      'Jira: Verbindungstest ist fehlgeschlagen. Bitte Zugangsdaten '
+                                      'und Berechtigungen prüfen.',
+                                    );
+                                  }
+                                }
+
+                                // GitLab-Fehler differenziert
+                                if (!gitlabOkay) {
+                                  final gitlabFieldsOk = app._gitlabFieldsFilled;
+
+                                  if (!gitlabFieldsOk) {
+                                    problems.add(
+                                      'GitLab: URL, PRIVATE-TOKEN oder Projekt-IDs sind nicht vollständig.',
+                                    );
+                                  } else {
+                                    problems.add(
+                                      'GitLab: Verbindungstest ist fehlgeschlagen. Bitte Base-URL, Token '
+                                      'und Projekt-IDs (sowie Token-Rechte) prüfen.',
+                                    );
+                                  }
+                                }
+
+                                final buffer = StringBuffer()
+                                  ..writeln('Die Einstellungen wurden gespeichert,')
+                                  ..writeln('aber es gab Probleme bei den Verbindungen:')
+                                  ..writeln()
+                                  ..writeln(problems.join('\n\n'));
+
+                                await _showErrorDialog('Verbindung fehlgeschlagen', buffer.toString());
                               },
                               child: const Text('Speichern'),
                             )
