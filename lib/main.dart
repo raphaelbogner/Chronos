@@ -512,6 +512,14 @@ class AppState extends ChangeNotifier {
 
   /// Gibt für einen Meeting-Titel das passende Jira-Ticket zurück.
   String resolveMeetingIssueKeyForTitle(String title) {
+    // 1. Check if title starts with a ticket
+    // Patterns: "PROJ-123: ...", "[PROJ-123] ...", "PROJ-123 ..."
+    final reStart = RegExp(r'^\[?([A-Za-z][A-Za-z0-9]+-\d+)\]?[:\s]?', caseSensitive: false);
+    final m = reStart.firstMatch(title.trim());
+    if (m != null) {
+      return m.group(1)!.toUpperCase();
+    }
+
     final rules = settings.meetingRules;
     if (rules.isEmpty) return settings.meetingIssueKey;
 
