@@ -166,18 +166,23 @@ class _DeleteModeScreenState extends State<DeleteModeScreen> {
       appBar: AppBar(
         title: const Text('Jira Worklogs löschen'),
       ),
-      body: Column(
-        children: [
-          _buildHeader(),
-          if (_loading) const LinearProgressIndicator(),
-          if (_statusMessage.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: Text(_statusMessage, style: const TextStyle(color: Colors.red)),
-            ),
-          Expanded(child: _buildCalendar()),
-          _buildBottomBar(),
-        ],
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 1000),
+          child: Column(
+            children: [
+              _buildHeader(),
+              if (_loading) const LinearProgressIndicator(),
+              if (_statusMessage.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.all(8.0),
+                  child: Text(_statusMessage, style: const TextStyle(color: Colors.red)),
+                ),
+              Expanded(child: _buildCalendar()),
+              _buildBottomBar(),
+            ],
+          ),
+        ),
       ),
       // Overlay when deleting
       // trivial implementiert via Stack im Body wäre schöner, aber so gehts auch:
