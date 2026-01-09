@@ -340,9 +340,10 @@ IcsParseResult parseIcs(String content, {String selfEmail = ''}) {
   }
 
   DateTime? valueDateToEnd(String v) {
-    final s = valueDateToStart(v);
-    if (s == null) return null;
-    return s.add(const Duration(days: 1));
+    // DTEND;VALUE=DATE in ICS is already the exclusive end date
+    // For a 1-day event on Jan 15, DTSTART=20240115 and DTEND=20240116
+    // We should NOT add another day here
+    return valueDateToStart(v);
   }
 
   for (final raw in lines) {

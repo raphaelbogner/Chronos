@@ -174,9 +174,12 @@ class SettingsModel {
         gitlabToken: (m['gitlabToken'] ?? '').toString(),
         gitlabProjectIds: (m['gitlabProjectIds'] ?? '').toString(),
         gitlabAuthorEmail: (m['gitlabAuthorEmail'] ?? '').toString(),
-        gitlabLookbackDays: (m['gitlabLookbackDays'] ?? 30) is int
-            ? m['gitlabLookbackDays'] as int
-            : int.tryParse((m['gitlabLookbackDays'] ?? '30').toString()) ?? 30,
+        gitlabLookbackDays: () {
+          final value = m['gitlabLookbackDays'];
+          if (value == null) return 30;
+          if (value is int) return value;
+          return int.tryParse(value.toString()) ?? 30;
+        }(),
         noGitlabAccount: (m['noGitlabAccount'] ?? false) as bool,
         nonMeetingHintsMultiline: (m['nonMeetingHintsMultiline'] ?? defaultNonMeetingHintsMultiline) as String,
         meetingRules: ((m['meetingRules'] as List?) ?? const [])

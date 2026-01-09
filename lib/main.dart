@@ -3445,12 +3445,15 @@ class _HomePageState extends State<HomePage> {
 
         // Arzttermine aus Timetac erkennen (absenceTotal > 0)
         // ABER: Nur wenn es kein voller Krankenstand/Feiertag/Urlaubstag ist
+        // UND: Nur wenn die bezahlte Nichtarbeitszeit nicht den ganzen Tag ausmacht
         final doctorDrafts = <DraftLog>[];
         final isFullSickDay = rowsForDay.any((r) => r.sickDays > 0);
         final isFullHoliday = rowsForDay.any((r) => r.holidayDays > 0);
         final isFullVacation = rowsForDay.any((r) => r.vacationHours.inHours >= 8);
+        final isFullDayPaidNonWork = doctor >= productiveDur && productiveDur > Duration.zero;
+        final noWorkWindow = productiveDur == Duration.zero;
         
-        if (!isFullSickDay && !isFullHoliday && !isFullVacation) {
+        if (!isFullSickDay && !isFullHoliday && !isFullVacation && !isFullDayPaidNonWork && !noWorkWindow) {
           for (final r in rowsForDay) {
             if (r.absenceTotal > Duration.zero) {
                final doctorDuration = r.absenceTotal;
