@@ -42,6 +42,14 @@ class UpdateService extends ChangeNotifier {
 
   String get currentVersion => _updateInfo?.currentVersion ?? '';
 
+  /// Get the platform identifier for asset matching
+  String get _platformIdentifier {
+    if (Platform.isWindows) return 'windows';
+    if (Platform.isMacOS) return 'macos';
+    if (Platform.isLinux) return 'linux';
+    return 'unknown';
+  }
+
   /// Check for updates by querying GitHub Releases API.
   Future<UpdateInfo?> checkForUpdates() async {
     if (_isChecking) return _updateInfo;
@@ -82,14 +90,23 @@ class UpdateService extends ChangeNotifier {
       final latestVersion = tagName.replaceFirst(RegExp(r'^v'), ''); // Remove 'v' prefix
       final releaseNotes = (data['body'] as String?) ?? '';
 
-      // Find Windows asset
+      // Find platform-specific asset
       String downloadUrl = '';
       final assets = data['assets'] as List<dynamic>? ?? [];
       for (final asset in assets) {
-        final name = (asset['name'] as String?) ?? '';
-        if (name.toLowerCase().contains('windows') && name.endsWith('.zip')) {
-          downloadUrl = (asset['browser_download_url'] as String?) ?? '';
-          break;
+        final name = (asset['name'] as String?)?.toLowerCase() ?? '';
+        if (name.contains(_platformIdentifier)) {
+          // Check for appropriate archive format
+          if (Platform.isWindows && name.endsWith('.zip')) {
+            downloadUrl = (asset['browser_download_url'] as String?) ?? '';
+            break;
+          } else if (Platform.isMacOS && name.endsWith('.zip')) {
+            downloadUrl = (asset['browser_download_url'] as String?) ?? '';
+            break;
+          } else if (Platform.isLinux && (name.endsWith('.tar.gz') || name.endsWith('.zip'))) {
+            downloadUrl = (asset['browser_download_url'] as String?) ?? '';
+            break;
+          }
         }
       }
 
@@ -143,11 +160,11 @@ class UpdateService extends ChangeNotifier {
   }
 
   /// Download and extract the update.
-  /// Returns the path to the new executable, or null on failure.
+  /// Returns the path to the update script, or null on failure.
   Future<String?> downloadAndExtract() async {
     if (_updateInfo == null || !_updateInfo!.updateAvailable) return null;
     if (_updateInfo!.downloadUrl.isEmpty) {
-      _error = 'Kein Windows-Download verfügbar';
+      _error = 'Kein Download für ${_platformIdentifier.toUpperCase()} verfügbar';
       notifyListeners();
       return null;
     }
@@ -158,7 +175,7 @@ class UpdateService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Download the ZIP file
+      // Download the archive file
       final request = http.Request('GET', Uri.parse(_updateInfo!.downloadUrl));
       final streamedResponse = await request.send();
 
@@ -182,52 +199,22 @@ class UpdateService extends ChangeNotifier {
       // Get the app's installation directory
       final exePath = Platform.resolvedExecutable;
       final appDir = Directory(exePath).parent;
+      final pathSep = Platform.pathSeparator;
       
       // Create a temp directory for extraction
-      final tempDir = Directory('${appDir.path}\\update_temp');
+      final tempDir = Directory('${appDir.path}${pathSep}update_temp');
       if (await tempDir.exists()) {
         await tempDir.delete(recursive: true);
       }
       await tempDir.create();
 
-      // Extract the ZIP
-      final archive = ZipDecoder().decodeBytes(bytes);
-      for (final file in archive) {
-        final filename = file.name;
-        if (file.isFile) {
-          final outFile = File('${tempDir.path}\\$filename');
-          await outFile.parent.create(recursive: true);
-          await outFile.writeAsBytes(file.content as List<int>);
-        }
-      }
+      // Extract the archive
+      await _extractArchive(bytes, tempDir, _updateInfo!.downloadUrl);
 
-      // Find the new executable
-      final newExe = await _findExecutable(tempDir);
-      if (newExe == null) {
-        throw Exception('Keine ausführbare Datei im Update gefunden');
-      }
-
-      // Create update script that will:
-      // 1. Wait for current process to exit
-      // 2. Copy new files over old ones
-      // 3. Start the new executable
-      // 4. Delete itself
-      final updateScript = File('${appDir.path}\\update.bat');
-      final scriptContent = '''
-@echo off
-echo Warte auf Beendigung der alten Version...
-timeout /t 2 /nobreak > nul
-echo Installiere Update...
-xcopy /s /y "${tempDir.path}\\*" "${appDir.path}\\" > nul
-echo Starte neue Version...
-start "" "${exePath}"
-echo Räume auf...
-rmdir /s /q "${tempDir.path}"
-del "%~f0"
-''';
-      await updateScript.writeAsString(scriptContent);
-
-      return updateScript.path;
+      // Create platform-specific update script
+      final scriptPath = await _createUpdateScript(appDir, tempDir, exePath);
+      
+      return scriptPath;
     } catch (e) {
       _error = e.toString();
       return null;
@@ -237,31 +224,114 @@ del "%~f0"
     }
   }
 
-  /// Find the main executable in the extracted directory.
-  Future<File?> _findExecutable(Directory dir) async {
-    await for (final entity in dir.list(recursive: true)) {
-      if (entity is File && entity.path.toLowerCase().endsWith('.exe')) {
-        final name = entity.path.split(Platform.pathSeparator).last.toLowerCase();
-        if (name == 'chronos.exe' || name.contains('chronos')) {
-          return entity;
+  /// Extract archive based on format
+  Future<void> _extractArchive(List<int> bytes, Directory tempDir, String url) async {
+    final pathSep = Platform.pathSeparator;
+    
+    if (url.endsWith('.tar.gz')) {
+      // Extract tar.gz (Linux)
+      final gzData = GZipDecoder().decodeBytes(bytes);
+      final archive = TarDecoder().decodeBytes(gzData);
+      for (final file in archive) {
+        final filename = file.name;
+        if (file.isFile) {
+          final outFile = File('${tempDir.path}$pathSep$filename');
+          await outFile.parent.create(recursive: true);
+          await outFile.writeAsBytes(file.content as List<int>);
+        }
+      }
+    } else {
+      // Extract ZIP (Windows, macOS)
+      final archive = ZipDecoder().decodeBytes(bytes);
+      for (final file in archive) {
+        final filename = file.name;
+        if (file.isFile) {
+          final outFile = File('${tempDir.path}$pathSep$filename');
+          await outFile.parent.create(recursive: true);
+          await outFile.writeAsBytes(file.content as List<int>);
         }
       }
     }
-    // Fallback: any .exe file
-    await for (final entity in dir.list(recursive: true)) {
-      if (entity is File && entity.path.toLowerCase().endsWith('.exe')) {
-        return entity;
-      }
+  }
+
+  /// Create platform-specific update script
+  Future<String> _createUpdateScript(Directory appDir, Directory tempDir, String exePath) async {
+    final pathSep = Platform.pathSeparator;
+    
+    if (Platform.isWindows) {
+      final updateScript = File('${appDir.path}${pathSep}update.bat');
+      final scriptContent = '''
+@echo off
+echo Warte auf Beendigung der alten Version...
+timeout /t 2 /nobreak > nul
+echo Installiere Update...
+xcopy /s /y "${tempDir.path}${pathSep}*" "${appDir.path}${pathSep}" > nul
+echo Starte neue Version...
+start "" "$exePath"
+echo Raeume auf...
+rmdir /s /q "${tempDir.path}"
+del "%~f0"
+''';
+      await updateScript.writeAsString(scriptContent);
+      return updateScript.path;
+    } else if (Platform.isMacOS) {
+      final updateScript = File('${appDir.path}${pathSep}update.sh');
+      final scriptContent = '''
+#!/bin/bash
+echo "Warte auf Beendigung der alten Version..."
+sleep 2
+echo "Installiere Update..."
+cp -R "${tempDir.path}/"* "${appDir.path}/"
+chmod +x "$exePath"
+echo "Starte neue Version..."
+open "$exePath"
+echo "Räume auf..."
+rm -rf "${tempDir.path}"
+rm -- "\$0"
+''';
+      await updateScript.writeAsString(scriptContent);
+      // Make script executable
+      await Process.run('chmod', ['+x', updateScript.path]);
+      return updateScript.path;
+    } else if (Platform.isLinux) {
+      final updateScript = File('${appDir.path}${pathSep}update.sh');
+      final scriptContent = '''
+#!/bin/bash
+echo "Warte auf Beendigung der alten Version..."
+sleep 2
+echo "Installiere Update..."
+cp -R "${tempDir.path}/"* "${appDir.path}/"
+chmod +x "$exePath"
+echo "Starte neue Version..."
+"$exePath" &
+echo "Räume auf..."
+rm -rf "${tempDir.path}"
+rm -- "\$0"
+''';
+      await updateScript.writeAsString(scriptContent);
+      // Make script executable
+      await Process.run('chmod', ['+x', updateScript.path]);
+      return updateScript.path;
     }
-    return null;
+    
+    throw Exception('Nicht unterstützte Plattform');
   }
 
   /// Execute the update script (this will close the app).
   Future<void> executeUpdate(String scriptPath) async {
-    await Process.start(
-      'cmd',
-      ['/c', scriptPath],
-      mode: ProcessStartMode.detached,
-    );
+    if (Platform.isWindows) {
+      await Process.start(
+        'cmd',
+        ['/c', scriptPath],
+        mode: ProcessStartMode.detached,
+      );
+    } else {
+      // macOS and Linux use bash
+      await Process.start(
+        '/bin/bash',
+        [scriptPath],
+        mode: ProcessStartMode.detached,
+      );
+    }
   }
 }

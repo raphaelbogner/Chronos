@@ -1068,86 +1068,12 @@ class _HomePageState extends State<HomePage> {
 
     if (confirmed != true || !mounted) return;
 
-    // Start download and show progress dialog
-    String? scriptPath;
-    
-    // Start download in parallel with showing dialog
-    final downloadFuture = _updateService.downloadAndExtract();
-    
-    await showDialog(
-      context: ctx,
-      barrierDismissible: false,
-      builder: (c) {
-        bool hasPopped = false;
-        
-        // Listen to download progress
-        void onProgress() {
-          if (!context.mounted || hasPopped) return;
-          
-          // Close dialog when download is complete
-          if (!_updateService.isDownloading && !_updateService.isChecking) {
-            hasPopped = true;
-            _updateService.removeListener(onProgress);
-            // Use post-frame callback to avoid Navigator lock error
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (Navigator.of(c).canPop()) {
-                Navigator.of(c).pop();
-              }
-            });
-          }
-        }
-        _updateService.addListener(onProgress);
+    // Start download and wait for completion
+    final scriptPath = await _updateService.downloadAndExtract();
 
-        return PopScope(
-          canPop: !_updateService.isDownloading,
-          onPopInvokedWithResult: (didPop, result) {
-            _updateService.removeListener(onProgress);
-          },
-          child: AlertDialog(
-            title: const Text('Update wird heruntergeladen...'),
-            content: ListenableBuilder(
-              listenable: _updateService,
-              builder: (context, child) => Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  LinearProgressIndicator(
-                    value: _updateService.downloadProgress > 0 
-                        ? _updateService.downloadProgress 
-                        : null,
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    _updateService.downloadProgress > 0
-                        ? '${(_updateService.downloadProgress * 100).toStringAsFixed(0)}%'
-                        : 'Verbindung wird hergestellt...',
-                  ),
-                  if (_updateService.error != null) ...[
-                    const SizedBox(height: 12),
-                    Text(
-                      _updateService.error!,
-                      style: const TextStyle(color: Colors.red),
-                    ),
-                    const SizedBox(height: 12),
-                    TextButton(
-                      onPressed: () {
-                        _updateService.removeListener(onProgress);
-                        Navigator.of(c).pop();
-                      },
-                      child: const Text('Schließen'),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    );
+    if (!mounted) return;
 
-    // Wait for download to complete
-    scriptPath = await downloadFuture;
-
-    if (scriptPath != null && mounted) {
+    if (scriptPath != null) {
       // Show restart dialog
       final restart = await showDialog<bool>(
         context: ctx,
@@ -1172,8 +1098,8 @@ class _HomePageState extends State<HomePage> {
         await _updateService.executeUpdate(scriptPath);
         exit(0);
       }
-    } else if (_updateService.error != null && mounted) {
-      // Show error if download failed
+    } else if (_updateService.error != null) {
+      // Show error dialog
       await showDialog(
         context: ctx,
         builder: (c) => AlertDialog(
