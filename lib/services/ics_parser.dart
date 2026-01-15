@@ -1,7 +1,7 @@
 // lib/services/ics_parser.dart
 import 'dart:convert';
 
-import 'package:flutter_jira_timetac/models/models.dart';
+import 'package:chronos/models/models.dart';
 
 // =======================================================
 //                Configurable Non-Meeting Hints

@@ -1,8 +1,8 @@
 // test/csv_parser_test.dart
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_jira_timetac/models/models.dart';
-import 'package:flutter_jira_timetac/services/csv_parser.dart';
+import 'package:chronos/models/models.dart';
+import 'package:chronos/services/csv_parser.dart';
 
 void main() {
   late SettingsModel defaultSettings;

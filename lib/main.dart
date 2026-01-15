@@ -26,6 +26,8 @@ import 'ui/preview_utils.dart';
 import 'widgets/preview_table.dart';
 import 'widgets/draft_log_tile.dart';
 import 'services/title_replacement_service.dart';
+import 'services/update_service.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -570,6 +572,27 @@ class _HomePageState extends State<HomePage> {
   final Map<String, String> _issueOverrides = {}; // draftKey -> newKey
   String _draftKey(DraftLog d) => '${d.start.millisecondsSinceEpoch}-${d.end.millisecondsSinceEpoch}-${d.issueKey}';
 
+  // Update Service
+  final UpdateService _updateService = UpdateService();
+
+  @override
+  void initState() {
+    super.initState();
+    // Check for updates on app start
+    _updateService.checkForUpdates().then((_) {
+      if (mounted) setState(() {});
+    });
+    _updateService.addListener(() {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _updateService.dispose();
+    super.dispose();
+  }
+
   String? _leadingTicket(String msg) {
     if (msg.isEmpty) return null;
     if (msg.toLowerCase().startsWith('merge')) return null;
@@ -839,7 +862,22 @@ class _HomePageState extends State<HomePage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Chronos'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Chronos'),
+            const SizedBox(width: 12),
+            Text(
+              'v${_updateService.currentVersion}',
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+              ),
+            ),
+            const SizedBox(width: 12),
+            _buildUpdateWidget(),
+          ],
+        ),
         actionsPadding: const EdgeInsets.only(right: 12.0),
         actions: [
           _statusPill(state.isJiraConfigured, 'Jira'),
@@ -913,6 +951,244 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
     );
+  }
+
+  // Update-Widget für die AppBar
+  Widget _buildUpdateWidget() {
+    if (_updateService.isChecking) {
+      return const SizedBox(
+        width: 16,
+        height: 16,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+    }
+
+    final info = _updateService.updateInfo;
+    if (info == null) {
+      return const SizedBox.shrink();
+    }
+
+    if (!info.updateAvailable) {
+      return Tooltip(
+        message: 'Aktuelle Version',
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.check_circle,
+              size: 16,
+              color: Colors.green.shade400,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              'Aktuell',
+              style: TextStyle(
+                fontSize: 11,
+                color: Colors.green.shade400,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // Update available
+    return FilledButton.tonal(
+      onPressed: () => _showUpdateDialog(context),
+      style: FilledButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        minimumSize: Size.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.download, size: 14),
+          const SizedBox(width: 4),
+          Text(
+            'Update auf v${info.latestVersion}',
+            style: const TextStyle(fontSize: 11),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showUpdateDialog(BuildContext ctx) async {
+    final info = _updateService.updateInfo;
+    if (info == null || !info.updateAvailable) return;
+
+    final confirmed = await showDialog<bool>(
+      context: ctx,
+      builder: (c) => AlertDialog(
+        title: const Text('Update verfügbar'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Neue Version: v${info.latestVersion}'),
+            Text('Aktuelle Version: v${info.currentVersion}'),
+            const SizedBox(height: 16),
+            if (info.releaseNotes.isNotEmpty) ...[
+              const Text('Release Notes:', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Container(
+                constraints: const BoxConstraints(maxHeight: 200, maxWidth: 400),
+                child: Scrollbar(
+                  thumbVisibility: true,
+                  child: SingleChildScrollView(
+                    child: MarkdownBody(
+                      data: info.releaseNotes,
+                      styleSheet: MarkdownStyleSheet(
+                        p: const TextStyle(fontSize: 13),
+                        h1: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        h2: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                        h3: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                        listBullet: const TextStyle(fontSize: 13),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(c).pop(false),
+            child: const Text('Später'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(c).pop(true),
+            child: const Text('Jetzt updaten'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    // Start download and show progress dialog
+    String? scriptPath;
+    
+    // Start download in parallel with showing dialog
+    final downloadFuture = _updateService.downloadAndExtract();
+    
+    await showDialog(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (c) {
+        bool hasPopped = false;
+        
+        // Listen to download progress
+        void onProgress() {
+          if (!context.mounted || hasPopped) return;
+          
+          // Close dialog when download is complete
+          if (!_updateService.isDownloading && !_updateService.isChecking) {
+            hasPopped = true;
+            _updateService.removeListener(onProgress);
+            // Use post-frame callback to avoid Navigator lock error
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (Navigator.of(c).canPop()) {
+                Navigator.of(c).pop();
+              }
+            });
+          }
+        }
+        _updateService.addListener(onProgress);
+
+        return PopScope(
+          canPop: !_updateService.isDownloading,
+          onPopInvokedWithResult: (didPop, result) {
+            _updateService.removeListener(onProgress);
+          },
+          child: AlertDialog(
+            title: const Text('Update wird heruntergeladen...'),
+            content: ListenableBuilder(
+              listenable: _updateService,
+              builder: (context, child) => Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  LinearProgressIndicator(
+                    value: _updateService.downloadProgress > 0 
+                        ? _updateService.downloadProgress 
+                        : null,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    _updateService.downloadProgress > 0
+                        ? '${(_updateService.downloadProgress * 100).toStringAsFixed(0)}%'
+                        : 'Verbindung wird hergestellt...',
+                  ),
+                  if (_updateService.error != null) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      _updateService.error!,
+                      style: const TextStyle(color: Colors.red),
+                    ),
+                    const SizedBox(height: 12),
+                    TextButton(
+                      onPressed: () {
+                        _updateService.removeListener(onProgress);
+                        Navigator.of(c).pop();
+                      },
+                      child: const Text('Schließen'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    // Wait for download to complete
+    scriptPath = await downloadFuture;
+
+    if (scriptPath != null && mounted) {
+      // Show restart dialog
+      final restart = await showDialog<bool>(
+        context: ctx,
+        barrierDismissible: false,
+        builder: (c) => AlertDialog(
+          icon: const Icon(Icons.check_circle, color: Colors.green, size: 48),
+          title: const Text('Update bereit'),
+          content: const Text(
+            'Das Update wurde heruntergeladen und entpackt.\n\n'
+            'Die Anwendung wird jetzt neu gestartet, um das Update zu installieren.',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(c).pop(true),
+              child: const Text('Jetzt neustarten'),
+            ),
+          ],
+        ),
+      );
+
+      if (restart == true) {
+        await _updateService.executeUpdate(scriptPath);
+        exit(0);
+      }
+    } else if (_updateService.error != null && mounted) {
+      // Show error if download failed
+      await showDialog(
+        context: ctx,
+        builder: (c) => AlertDialog(
+          icon: const Icon(Icons.error, color: Colors.red, size: 48),
+          title: const Text('Update fehlgeschlagen'),
+          content: Text(_updateService.error ?? 'Unbekannter Fehler'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(c).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   // kleine Statusanzeige (Icon + Label darunter)

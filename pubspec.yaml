@@ -1,4 +1,4 @@
-name: flutter_jira_timetac
+name: chronos
 description: Chronos - Time Tracking Efficiency
 publish_to: "none"
 version: 4.0.1+1
@@ -19,6 +19,9 @@ dependencies:
   http: ^1.2.2
   collection: ^1.18.0
   url_launcher: ^6.3.0
+  package_info_plus: ^8.0.0
+  archive: ^3.6.1
+  flutter_markdown: ^0.7.4
 
 dev_dependencies:
   flutter_test:

@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_jira_timetac/models/models.dart';
-import 'package:flutter_jira_timetac/services/title_replacement_service.dart';
+import 'package:chronos/models/models.dart';
+import 'package:chronos/services/title_replacement_service.dart';
 
 void main() {
   group('TitleReplacementService', () {

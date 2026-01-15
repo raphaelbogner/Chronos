@@ -1,6 +1,6 @@
 // test/ics_parser_test.dart
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_jira_timetac/services/ics_parser.dart';
+import 'package:chronos/services/ics_parser.dart';
 
 void main() {
   setUp(() {

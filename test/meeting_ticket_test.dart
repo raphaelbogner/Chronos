@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_jira_timetac/main.dart';
-import 'package:flutter_jira_timetac/models/models.dart';
+import 'package:chronos/main.dart';
+import 'package:chronos/models/models.dart';
 
 void main() {
   group('resolveMeetingIssueKeyForTitle', () {

@@ -1,8 +1,8 @@
 // test/time_comparison_service_test.dart
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_jira_timetac/models/models.dart';
-import 'package:flutter_jira_timetac/services/time_comparison_service.dart';
-import 'package:flutter_jira_timetac/services/jira_worklog_api.dart';
+import 'package:chronos/models/models.dart';
+import 'package:chronos/services/time_comparison_service.dart';
+import 'package:chronos/services/jira_worklog_api.dart';
 
 void main() {
   late TimeComparisonService service;

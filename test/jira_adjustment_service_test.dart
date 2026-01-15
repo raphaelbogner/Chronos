@@ -1,8 +1,8 @@
 // test/jira_adjustment_service_test.dart
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_jira_timetac/models/models.dart';
-import 'package:flutter_jira_timetac/services/jira_adjustment_service.dart';
-import 'package:flutter_jira_timetac/services/jira_worklog_api.dart';
+import 'package:chronos/models/models.dart';
+import 'package:chronos/services/jira_adjustment_service.dart';
+import 'package:chronos/services/jira_worklog_api.dart';
 
 // Mock implementation of JiraWorklogApi for testing
 class MockJiraWorklogApi extends JiraWorklogApi {
