@@ -121,6 +121,7 @@ class JiraAdjustmentService {
     required DateTime date,
     required List<TimetacRow> timetacRows,
     required List<JiraWorklog> jiraWorklogs,
+    bool outlierModeOnly = false,
   }) {
     final adjustments = <WorklogAdjustment>[];
     
@@ -179,7 +180,14 @@ class JiraAdjustmentService {
     final jiraEnd = sortedWorklogs.last.end;
     
     // --- SCHRITT 1: Startzeit anpassen ---
-    if (!_isSameMinute(ttStart, jiraStart)) {
+    bool shouldAdjustStart = !_isSameMinute(ttStart, jiraStart);
+    if (outlierModeOnly && shouldAdjustStart) {
+      // Outlier-Modus: Nur anpassen, wenn Jira zu früh ist (wir schneiden ab).
+      // Lücken werden nicht gefüllt.
+      shouldAdjustStart = jiraStart.isBefore(ttStart);
+    }
+    
+    if (shouldAdjustStart) {
       adjustments.add(WorklogAdjustment(
         type: AdjustmentType.moveStart,
         original: sortedWorklogs.first,
@@ -193,7 +201,14 @@ class JiraAdjustmentService {
     // Falls hier "Arzt" etc. schon abgezogen ist (was bei Timetac meist der Fall ist wenn es eine separate Buchung ist),
     // dann ist ttEnd bereits das korrekte "Arbeitsende".
     
-    if (!_isSameMinute(ttEnd, jiraEnd)) {
+    bool shouldAdjustEnd = !_isSameMinute(ttEnd, jiraEnd);
+    if (outlierModeOnly && shouldAdjustEnd) {
+      // Outlier-Modus: Nur anpassen, wenn Jira zu spät ist (wir schneiden ab).
+      // Lücken werden nicht gefüllt.
+      shouldAdjustEnd = jiraEnd.isAfter(ttEnd);
+    }
+    
+    if (shouldAdjustEnd) {
       final lastWl = sortedWorklogs.last;
       adjustments.add(WorklogAdjustment(
         type: AdjustmentType.moveEnd,

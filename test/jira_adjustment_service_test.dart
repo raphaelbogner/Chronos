@@ -730,4 +730,109 @@ void main() {
       expect(results[0], startsWith('✗'));
     });
   });
+
+  group('Outlier Mode Adjustments', () {
+    test('skips start extension (gap filling)', () {
+      final plan = service.generatePlan(
+        date: DateTime(2024, 1, 15),
+        timetacRows: [
+          createTimetacRow(
+            date: DateTime(2024, 1, 15),
+            start: DateTime(2024, 1, 15, 6, 0), // TT starts 6:00
+            end: DateTime(2024, 1, 15, 17, 0),
+          ),
+        ],
+        jiraWorklogs: [
+          createWorklog(
+            id: 'wl-1',
+            started: DateTime(2024, 1, 15, 8, 0), // Jira starts 8:00 (Gap)
+            duration: const Duration(hours: 9),
+          ),
+        ],
+        outlierModeOnly: true, // !!
+      );
+
+      // Normal mode would move start to 6:00. Outlier mode should IGNORE.
+      expect(plan.hasChanges, false);
+    });
+
+    test('allows start cutting (outlier fix)', () {
+      final plan = service.generatePlan(
+        date: DateTime(2024, 1, 15),
+        timetacRows: [
+          createTimetacRow(
+            date: DateTime(2024, 1, 15),
+            start: DateTime(2024, 1, 15, 8, 0), // TT starts 8:00
+            end: DateTime(2024, 1, 15, 17, 0),
+          ),
+        ],
+        jiraWorklogs: [
+          createWorklog(
+            id: 'wl-1',
+            started: DateTime(2024, 1, 15, 7, 0), // Jira starts 7:00 (Too early)
+            duration: const Duration(hours: 9),
+          ),
+        ],
+        outlierModeOnly: true,
+      );
+
+      // Should move start to 8:00
+      expect(plan.hasChanges, true);
+      final moveStart = plan.adjustments.where((a) => a.type == AdjustmentType.moveStart).toList();
+      expect(moveStart.length, 1);
+      expect(moveStart[0].newStart, DateTime(2024, 1, 15, 8, 0));
+    });
+
+    test('skips end extension (gap filling)', () {
+      final plan = service.generatePlan(
+        date: DateTime(2024, 1, 15),
+        timetacRows: [
+          createTimetacRow(
+            date: DateTime(2024, 1, 15),
+            start: DateTime(2024, 1, 15, 8, 0),
+            end: DateTime(2024, 1, 15, 17, 0), // TT ends 17:00
+          ),
+        ],
+        jiraWorklogs: [
+          createWorklog(
+            id: 'wl-1',
+            started: DateTime(2024, 1, 15, 8, 0),
+            duration: const Duration(hours: 8), // Ends 16:00 (Gap)
+          ),
+        ],
+        outlierModeOnly: true,
+      );
+
+      // Normal mode would extend to 17:00. Outlier mode should IGNORE.
+      expect(plan.hasChanges, false);
+    });
+
+    test('allows end cutting (outlier fix)', () {
+      final plan = service.generatePlan(
+        date: DateTime(2024, 1, 15),
+        timetacRows: [
+          createTimetacRow(
+            date: DateTime(2024, 1, 15),
+            start: DateTime(2024, 1, 15, 8, 0),
+            end: DateTime(2024, 1, 15, 17, 0), // TT ends 17:00
+          ),
+        ],
+        jiraWorklogs: [
+          createWorklog(
+            id: 'wl-1',
+            started: DateTime(2024, 1, 15, 8, 0),
+            duration: const Duration(hours: 10), // Ends 18:00 (Too late)
+          ),
+        ],
+        outlierModeOnly: true,
+      );
+
+      // Should shorten to 17:00
+      expect(plan.hasChanges, true);
+      final moveEnd = plan.adjustments.where((a) => a.type == AdjustmentType.moveEnd).toList();
+      expect(moveEnd.length, 1);
+      // New duration should be 9h (8-17)
+      expect(moveEnd[0].newDuration, const Duration(hours: 9));
+    });
+  });
 }
